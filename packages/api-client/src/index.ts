@@ -6,7 +6,7 @@ import type {
   Member,
   Message,
   SplitMode,
-} from "@spliitai/core";
+} from "@splitpea/core";
 
 export interface SplitInput {
   memberId: string;
@@ -77,9 +77,11 @@ export interface PostMessageResult {
   settleAllProposal?: { count: number };
 }
 
-// Typed client for the SpliitAI server. Uses the global `fetch`, which exists
+// Typed client for the SplitPea server. Uses the global `fetch`, which exists
 // in the browser, React Native, and Node 18+, so this file is reused unchanged
 // across web, mobile, and server-side tests.
+
+const API_PREFIX = "/api/v1";
 
 export interface ApiClientOptions {
   /** Base URL of the server, e.g. "http://localhost:4000". */
@@ -91,7 +93,7 @@ async function request<T>(
   path: string,
   init?: RequestInit
 ): Promise<T> {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await fetch(`${baseUrl.replace(/\/+$/, "")}${API_PREFIX}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
@@ -114,7 +116,7 @@ async function request<T>(
 
 export function createApiClient({ baseUrl }: ApiClientOptions) {
   return {
-    health: () => request<{ ok: boolean }>(baseUrl, "/api/health"),
+    health: () => request<{ ok: boolean }>(baseUrl, "/health"),
 
     createGroup: (
       name: string,
@@ -123,13 +125,13 @@ export function createApiClient({ baseUrl }: ApiClientOptions) {
       cardName?: string,
       participants?: string[]
     ) =>
-      request<{ group: Group; member: Member }>(baseUrl, "/api/groups", {
+      request<{ group: Group; member: Member }>(baseUrl, "/groups", {
         method: "POST",
         body: JSON.stringify({ name, creatorName, type, cardName, participants }),
       }),
 
     addMember: (inviteCode: string, name: string) =>
-      request<{ member: Member }>(baseUrl, `/api/groups/${inviteCode}/members`, {
+      request<{ member: Member }>(baseUrl, `/groups/${inviteCode}/members`, {
         method: "POST",
         body: JSON.stringify({ name }),
       }),
@@ -137,71 +139,71 @@ export function createApiClient({ baseUrl }: ApiClientOptions) {
     renameMember: (inviteCode: string, memberId: string, name: string) =>
       request<{ member: Member }>(
         baseUrl,
-        `/api/groups/${inviteCode}/members/${memberId}`,
+        `/groups/${inviteCode}/members/${memberId}`,
         { method: "PATCH", body: JSON.stringify({ name }) }
       ),
 
     removeMember: (inviteCode: string, memberId: string) =>
       request<{ ok: boolean }>(
         baseUrl,
-        `/api/groups/${inviteCode}/members/${memberId}`,
+        `/groups/${inviteCode}/members/${memberId}`,
         { method: "DELETE" }
       ),
 
     getGroup: (inviteCode: string) =>
       request<{ group: Group; members: Member[] }>(
         baseUrl,
-        `/api/groups/${inviteCode}`
+        `/groups/${inviteCode}`
       ),
 
     deleteGroup: (inviteCode: string) =>
-      request<{ ok: boolean }>(baseUrl, `/api/groups/${inviteCode}`, {
+      request<{ ok: boolean }>(baseUrl, `/groups/${inviteCode}`, {
         method: "DELETE",
       }),
 
     joinGroup: (inviteCode: string, name: string) =>
       request<{ member: Member }>(
         baseUrl,
-        `/api/groups/${inviteCode}/join`,
+        `/groups/${inviteCode}/join`,
         { method: "POST", body: JSON.stringify({ name }) }
       ),
 
     getMessages: (inviteCode: string) =>
       request<{ messages: Message[] }>(
         baseUrl,
-        `/api/groups/${inviteCode}/messages`
+        `/groups/${inviteCode}/messages`
       ),
 
     postMessage: (inviteCode: string, memberId: string, text: string) =>
       request<PostMessageResult>(
         baseUrl,
-        `/api/groups/${inviteCode}/messages`,
+        `/groups/${inviteCode}/messages`,
         { method: "POST", body: JSON.stringify({ memberId, text }) }
       ),
 
     getAccounts: (inviteCode: string) =>
       request<{ accounts: Account[] }>(
         baseUrl,
-        `/api/groups/${inviteCode}/accounts`
+        `/groups/${inviteCode}/accounts`
       ),
 
     createAccount: (inviteCode: string, name: string, paidByMemberId?: string) =>
       request<{ account: Account }>(
         baseUrl,
-        `/api/groups/${inviteCode}/accounts`,
+        `/groups/${inviteCode}/accounts`,
         { method: "POST", body: JSON.stringify({ name, paidByMemberId }) }
       ),
 
     getExpenses: (inviteCode: string) =>
       request<{ expenses: Expense[] }>(
         baseUrl,
-        `/api/groups/${inviteCode}/expenses`
+        `/groups/${inviteCode}/expenses`
       ),
 
     createExpense: (inviteCode: string, expense: NewExpense) =>
       request<{ expense: Expense; hostMessage: Message }>(
         baseUrl,
-        `/api/groups/${inviteCode}/expenses`,
+        `/groups/${inviteCode}/expenses`,
         { method: "POST", body: JSON.stringify(expense) }
       ),
 
@@ -213,14 +215,14 @@ export function createApiClient({ baseUrl }: ApiClientOptions) {
     ) =>
       request<{ hostMessage: Message }>(
         baseUrl,
-        `/api/groups/${inviteCode}/payments`,
+        `/groups/${inviteCode}/payments`,
         { method: "POST", body: JSON.stringify({ fromMemberId, toMemberId, amount }) }
       ),
 
     settleAll: (inviteCode: string) =>
       request<{ ok: boolean; count: number }>(
         baseUrl,
-        `/api/groups/${inviteCode}/settle-all`,
+        `/groups/${inviteCode}/settle-all`,
         { method: "POST" }
       ),
 
@@ -230,7 +232,7 @@ export function createApiClient({ baseUrl }: ApiClientOptions) {
         settlements: SettlementView[];
         groupType: GroupType;
         cardName: string | null;
-      }>(baseUrl, `/api/groups/${inviteCode}/balances`),
+      }>(baseUrl, `/groups/${inviteCode}/balances`),
   };
 }
 

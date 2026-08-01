@@ -2,7 +2,7 @@
 // user doesn't re-enter details every visit — the no-login equivalent of a
 // session. For M0 (web) this uses localStorage; native gets AsyncStorage later.
 
-import type { GroupType } from "@spliitai/core";
+import type { GroupType } from "@splitpea/core";
 
 export interface JoinedGroup {
   inviteCode: string;
@@ -12,7 +12,7 @@ export interface JoinedGroup {
   memberName: string;
 }
 
-const KEY = "spliitai.joinedGroups";
+const KEY = "splitpea.joinedGroups";
 
 function getLocalStorage(): Storage | null {
   try {

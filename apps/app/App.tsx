@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -11,9 +12,16 @@ import {
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import type { Account, GroupType, Member, Message } from "@spliitai/core";
-import type { ExpenseProposal, SettlementProposal } from "@spliitai/api-client";
+import {
+  formatStructuredMemberName,
+  type Account,
+  type GroupType,
+  type Member,
+  type Message,
+} from "@splitpea/core";
+import type { ExpenseProposal, SettlementProposal } from "@splitpea/api-client";
 import { api } from "./src/api";
+import { KOFI_URL } from "./src/config";
 import { loadGroups, removeGroup, saveGroup, type JoinedGroup } from "./src/storage";
 import {
   BalancesPanel,
@@ -101,6 +109,7 @@ function HomeScreen({
   const [groups, setGroups] = useState<JoinedGroup[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [supportError, setSupportError] = useState<string | null>(null);
   const [confirmLeaveCode, setConfirmLeaveCode] = useState<string | null>(null);
 
   // Create form
@@ -175,9 +184,19 @@ function HomeScreen({
     setGroups(loadGroups());
   }
 
+  async function openKoFi() {
+    if (!KOFI_URL) return;
+    setSupportError(null);
+    try {
+      await Linking.openURL(KOFI_URL);
+    } catch {
+      setSupportError("Couldn't open Ko-fi. Please try again.");
+    }
+  }
+
   return (
     <ScrollView contentContainerStyle={styles.homeContainer}>
-      <Text style={styles.title}>SpliitAI</Text>
+      <Text style={styles.title}>SplitPea</Text>
       <Text style={styles.subtitle}>Split bills by chatting.</Text>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -282,6 +301,28 @@ function HomeScreen({
           onPress={() => onFind(joinCode.trim().toUpperCase())}
         />
       </View>
+
+      {KOFI_URL ? (
+        <View style={styles.supportFooter}>
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel="Support this project on Ko-fi"
+            accessibilityHint="Opens Ko-fi in your browser"
+            onPress={openKoFi}
+            style={({ pressed }) => [
+              styles.supportLink,
+              pressed && styles.supportLinkPressed,
+            ]}
+          >
+            <Text style={styles.supportLinkText}>
+              Support this project on Ko-fi ☕ ↗
+            </Text>
+          </Pressable>
+          {supportError ? (
+            <Text style={styles.supportError}>{supportError}</Text>
+          ) : null}
+        </View>
+      ) : null}
     </ScrollView>
   );
 }
@@ -399,6 +440,8 @@ function ChatScreen({
   onBack: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
+  const [metaLoaded, setMetaLoaded] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [overlay, setOverlay] = useState<null | "expense" | "balances" | "members">(null);
@@ -427,11 +470,13 @@ function ChatScreen({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const listRef = useRef<FlatList<Message>>(null);
+  const composerRef = useRef<TextInput>(null);
 
   async function refresh() {
     try {
       const { messages } = await api.getMessages(group.inviteCode);
       setMessages(messages);
+      setMessagesLoaded(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -447,6 +492,8 @@ function ChatScreen({
       setAccounts(a.accounts);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMetaLoaded(true);
     }
   }
 
@@ -457,6 +504,25 @@ function ChatScreen({
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [group.inviteCode]);
+
+  const senderName =
+    members.find((m) => m.id === group.memberId)?.name ?? group.memberName;
+  const otherName = members.find((m) => m.id !== group.memberId)?.name;
+  const senderLabel = formatStructuredMemberName(senderName);
+  const otherLabel = otherName
+    ? formatStructuredMemberName(otherName)
+    : undefined;
+  const examplePayer = otherLabel ?? senderLabel;
+  const examplePeople = otherLabel
+    ? `${senderLabel} and ${otherLabel}`
+    : senderLabel;
+  const structuredExample = isJoint
+    ? `$40 on dinner, for ${examplePeople}, split evenly`
+    : `$40 on dinner, paid by ${examplePayer}, for ${examplePeople}, split evenly`;
+  const cardLabel = accounts[0]?.name ?? "The shared card";
+  const composerPlaceholder = isJoint
+    ? "Try: $40 on dinner, for everyone…"
+    : `Try: $40 on dinner, paid by ${examplePayer}…`;
 
   async function handleSend() {
     const t = text.trim();
@@ -562,6 +628,9 @@ function ChatScreen({
               <Text style={{ color: BLUE }}>{copied ? "Copied!" : "Copy link"}</Text>
             </Text>
           </Pressable>
+          <Text style={styles.chatTrust}>
+            Anyone with this link can access the group. Share it only with people you trust.
+          </Text>
         </View>
       </View>
 
@@ -592,6 +661,44 @@ function ChatScreen({
           listRef.current?.scrollToEnd({ animated: true })
         }
         renderItem={({ item }) => <Bubble message={item} myId={group.memberId} />}
+        ListEmptyComponent={
+          messagesLoaded && metaLoaded ? (
+            <View style={styles.emptyChat}>
+              <Text style={styles.exampleEyebrow}>TRY AN EXPENSE</Text>
+              {isJoint ? (
+                <Text style={styles.examplePayerNote}>
+                  {cardLabel} is always the payer.
+                </Text>
+              ) : null}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Use example expense: ${structuredExample}`}
+                accessibilityHint={
+                  "Fills the message input so you can edit it. " +
+                  "It will not send automatically."
+                }
+                onPress={() => {
+                  setText(structuredExample);
+                  composerRef.current?.focus();
+                }}
+                style={({ pressed }) => [
+                  styles.exampleCard,
+                  pressed && styles.exampleCardPressed,
+                ]}
+              >
+                <Text style={styles.exampleFormula}>{structuredExample}</Text>
+                <Text style={styles.exampleHint}>Use this example</Text>
+              </Pressable>
+              <Text style={styles.exampleTemplate}>
+                {isJoint
+                  ? "amount · what · for whom · split evenly"
+                  : "amount · what · paid by whom · for whom · split evenly"}
+              </Text>
+            </View>
+          ) : (
+            <ActivityIndicator style={styles.emptyLoader} />
+          )
+        }
         ListFooterComponent={
           proposal || settlement || settleAll ? (
             <View style={styles.pendingBubble}>
@@ -628,12 +735,10 @@ function ChatScreen({
 
       <View style={styles.composer}>
         <TextInput
+          ref={composerRef}
+          accessibilityLabel="Expense message"
           style={styles.composerInput}
-          placeholder={
-            isJoint
-              ? "e.g. I spent 40 on gas"
-              : "e.g. paid 40 for dinner, split with Bob"
-          }
+          placeholder={composerPlaceholder}
           value={text}
           onChangeText={setText}
           onSubmitEditing={handleSend}
@@ -757,7 +862,7 @@ function Button({
 const BLUE = "#2563eb";
 
 // Display name for the assistant. The message role stays "host" internally.
-const HOST_NAME = "Spliit Agent";
+const HOST_NAME = "SplitPea Agent";
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f3f4f6" },
@@ -810,6 +915,19 @@ const styles = StyleSheet.create({
   leaveText: { fontSize: 14, fontWeight: "600", color: "#6b7280" },
   typeHint: { fontSize: 12, color: "#6b7280", fontStyle: "italic" },
   error: { color: "#dc2626", fontSize: 14, paddingHorizontal: 20 },
+  supportFooter: { alignItems: "center", gap: 2 },
+  supportLink: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  supportLinkPressed: { opacity: 0.55 },
+  supportLinkText: {
+    color: "#6b7280",
+    fontSize: 13,
+    textDecorationLine: "underline",
+  },
+  supportError: { color: "#dc2626", fontSize: 12, textAlign: "center" },
 
   // Buttons
   button: {
@@ -839,6 +957,7 @@ const styles = StyleSheet.create({
   backText: { color: BLUE, fontSize: 26, fontWeight: "600", lineHeight: 28 },
   chatTitle: { fontSize: 17, fontWeight: "700", color: "#111827" },
   chatMeta: { fontSize: 12, color: "#6b7280" },
+  chatTrust: { fontSize: 11, color: "#9ca3af", marginTop: 2 },
   actionBar: {
     flexDirection: "row",
     gap: 8,
@@ -858,6 +977,34 @@ const styles = StyleSheet.create({
   actionText: { color: BLUE, fontWeight: "600", fontSize: 13 },
   actionTextPrimary: { color: "#fff", fontWeight: "700", fontSize: 13 },
   messageList: { flex: 1 },
+  emptyLoader: { marginTop: 36 },
+  emptyChat: {
+    alignItems: "center",
+    paddingHorizontal: 8,
+    paddingVertical: 28,
+    gap: 9,
+  },
+  examplePayerNote: { color: "#6b7280", fontSize: 13, textAlign: "center" },
+  exampleEyebrow: {
+    color: "#6b7280",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  exampleCard: {
+    width: "100%",
+    maxWidth: 520,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+    borderRadius: 14,
+    padding: 14,
+    gap: 7,
+  },
+  exampleCardPressed: { opacity: 0.7 },
+  exampleFormula: { color: "#111827", fontSize: 15, lineHeight: 22 },
+  exampleHint: { color: BLUE, fontSize: 12, fontWeight: "700" },
+  exampleTemplate: { color: "#6b7280", fontSize: 12, textAlign: "center" },
   pendingBubble: {
     alignSelf: "flex-start",
     maxWidth: "94%",

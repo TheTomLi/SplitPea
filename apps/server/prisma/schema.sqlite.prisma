@@ -1,20 +1,18 @@
-// SplitPea production schema (Neon PostgreSQL).
-// Local development uses schema.sqlite.prisma so it remains zero-setup.
+// SplitPea local-development schema. Production uses schema.prisma (Postgres).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
 }
 
 model Group {
   id         String    @id @default(cuid())
   name       String
-  type       String    @default("split") // 'split' | 'joint'
+  type       String    @default("split")
   inviteCode String    @unique
   createdAt  DateTime  @default(now())
   members    Member[]
@@ -28,8 +26,6 @@ model Member {
   id        String    @id @default(cuid())
   groupId   String
   name      String
-  // Set when the person is removed from the group but still appears in past
-  // expenses. Their history stays intact; they're hidden from the active roster.
   removedAt DateTime?
   group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
@@ -39,7 +35,6 @@ model Member {
   accountsPaid Account[] @relation("AccountPaidByMember")
 }
 
-// A payer that may not be a person: a shared card, a cash pool, etc.
 model Account {
   id             String  @id @default(cuid())
   groupId        String
@@ -58,10 +53,9 @@ model Expense {
   description String
   category    String?
   date        DateTime @default(now())
-  createdVia  String   @default("manual") // 'manual' | 'rules' | 'llm'
+  createdVia  String   @default("manual")
   createdAt   DateTime @default(now())
 
-  // Who fronted the money — a member OR an account (exactly one is set).
   paidByMemberId  String?
   paidByAccountId String?
 
@@ -71,23 +65,21 @@ model Expense {
   splits        Split[]
 }
 
-// One beneficiary allocation of an expense (who should bear the cost).
 model Split {
   id        String  @id @default(cuid())
   expenseId String
   memberId  String
-  mode      String  @default("even") // 'even' | 'shares' | 'percent' | 'exact'
+  mode      String  @default("even")
   value     Float   @default(0)
   expense   Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
   member    Member  @relation(fields: [memberId], references: [id])
 }
 
-// A settlement/repayment. `toMemberId` null means paid to the card (joint mode).
 model Payment {
   id           String   @id @default(cuid())
   groupId      String
   fromMemberId String
-  toMemberId   String? // null = the shared card
+  toMemberId   String?
   amount       Float
   createdAt    DateTime @default(now())
   group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
@@ -97,10 +89,10 @@ model Message {
   id          String   @id @default(cuid())
   groupId     String
   memberId    String?
-  role        String // 'user' | 'host'
+  role        String
   text        String
   cardType    String?
-  cardPayload String? // JSON string
+  cardPayload String?
   createdAt   DateTime @default(now())
   group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
   member      Member?  @relation(fields: [memberId], references: [id])

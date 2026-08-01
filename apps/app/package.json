@@ -1,11 +1,11 @@
 {
-  "name": "@spliitai/app",
+  "name": "@splitpea/app",
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~57.0.8",
-    "@spliitai/api-client": "*",
-    "@spliitai/core": "*",
+    "@splitpea/api-client": "*",
+    "@splitpea/core": "*",
     "expo": "~57.0.9",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",

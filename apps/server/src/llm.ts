@@ -17,7 +17,7 @@ import type {
   ParseResult,
   ParsedSplit,
   SplitMode,
-} from "@spliitai/core";
+} from "@splitpea/core";
 
 interface LlmContextMember {
   id: string;

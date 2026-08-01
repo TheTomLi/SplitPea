@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import type { Account, GroupType, Member, SplitMode } from "@spliitai/core";
+import type { Account, GroupType, Member, SplitMode } from "@splitpea/core";
 import type {
   ExpenseProposal,
   MemberBalanceView,
@@ -8,7 +8,7 @@ import type {
   SettlementProposal,
   SettlementView,
   SplitInput,
-} from "@spliitai/api-client";
+} from "@splitpea/api-client";
 import { api } from "./api";
 import { Button, Chip, COLORS, u } from "./ui";
 

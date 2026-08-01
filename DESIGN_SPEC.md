@@ -1,4 +1,4 @@
-# SpliitAI — Design Spec (v0.1)
+# SplitPea — Design Spec (v0.1)
 
 > A chat-first, no-login bill-splitting app. Rethinks Spliit's form-heavy UX as a
 > group chat where you *type or speak* an expense in natural language and a host
@@ -55,7 +55,7 @@ Monorepo. Everything except the screen layouts is framework-agnostic and reused
 verbatim on mobile.
 
 ```
-spliitai/
+splitpea/
 ├─ packages/
 │  ├─ core/          # pure TypeScript — no UI, no framework
 │  │  ├─ types       # Group, Member, Account, Expense, Split, ...
@@ -196,8 +196,10 @@ Voice = native dictation → text → same parser pipeline. No extra cost.
 - **UI:** Expo (React Native + `react-native-web`) — one codebase → web now,
   iOS/Android later.
 - **Language:** TypeScript everywhere.
-- **Backend:** Node API in `apps/server` (framework TBD — likely a lightweight
-  option that plays well with Expo). Postgres + Prisma.
+- **Backend:** Express API in `apps/server`, hosted on Railway. Prisma with
+  SQLite locally and Neon PostgreSQL in production.
+- **Web hosting:** Cloudflare Pages at `getsplitpea.com`; API at
+  `api.getsplitpea.com` with a stable `/api/v1` prefix.
 - **LLM:** Gemini Flash free tier (swappable).
 - **Balance math + parser:** `packages/core`, pure TS, reused everywhere.
 
@@ -221,7 +223,6 @@ Voice = native dictation → text → same parser pipeline. No extra cost.
 
 ## 11. Open questions
 
-- Backend framework choice (kept open until M0).
 - Exact free-tier limits of Gemini Flash and whether they suffice at your scale.
 - ~~Multi-currency~~ **Decided:** no multi-currency, no conversion. Display a
   plain `$` sign; users convert on their own if needed.

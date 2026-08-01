@@ -1,23 +1,27 @@
 {
-  "name": "@spliitai/server",
+  "name": "@splitpea/server",
   "version": "0.0.0",
   "private": true,
   "main": "src/index.ts",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "start:prod": "prisma db push --skip-generate && tsx src/index.ts",
-    "postinstall": "prisma generate",
-    "db:push": "prisma db push",
-    "db:reset": "prisma db push --force-reset --skip-generate",
-    "db:generate": "prisma generate",
-    "db:studio": "prisma studio"
+    "dev": "prisma generate --schema prisma/schema.sqlite.prisma && tsx watch src/index.ts",
+    "start": "prisma generate --schema prisma/schema.sqlite.prisma && tsx src/index.ts",
+    "start:prod": "prisma generate --schema prisma/schema.prisma && tsx src/index.ts",
+    "postinstall": "prisma generate --schema prisma/schema.sqlite.prisma",
+    "db:push": "prisma db push --schema prisma/schema.sqlite.prisma",
+    "db:push:prod": "prisma db push --schema prisma/schema.prisma --skip-generate",
+    "db:reset": "prisma db push --schema prisma/schema.sqlite.prisma --force-reset --skip-generate",
+    "db:generate": "prisma generate --schema prisma/schema.sqlite.prisma",
+    "db:generate:prod": "prisma generate --schema prisma/schema.prisma",
+    "db:studio": "prisma studio --schema prisma/schema.sqlite.prisma",
+    "test:security": "node --import tsx --test test/http-security.test.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.19.0",
-    "@spliitai/core": "*",
+    "@splitpea/core": "*",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "express-rate-limit": "^8.6.1",
     "prisma": "^5.19.0",
     "tsx": "^4.19.0"
   },

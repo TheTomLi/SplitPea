@@ -1,14 +1,19 @@
 import express from "express";
-import cors from "cors";
 import { prisma } from "./db";
 import { generateInviteCode } from "./invite";
 import {
   computeBalances,
   computeSplitCents,
+  formatStructuredMemberName,
   parseMessage,
   type SplitMode,
-} from "@spliitai/core";
+} from "@splitpea/core";
 import { isLLMEnabled, llmParse } from "./llm";
+import {
+  configureHttpSecurity,
+  createGroupLimiter,
+  messageLimiter,
+} from "./http-security";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 
@@ -74,10 +79,12 @@ async function computeGroupBalances(groupId: string) {
 }
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const mutationLimiter = configureHttpSecurity(app);
+app.use(express.json({ limit: "64kb" }));
 
 const PORT = Number(process.env.PORT ?? 4000);
+const api = express.Router();
+api.use(mutationLimiter);
 
 // --- helpers ---------------------------------------------------------------
 
@@ -88,13 +95,13 @@ async function findGroup(inviteCode: string) {
 
 // --- routes ----------------------------------------------------------------
 
-app.get("/api/health", (_req, res) => {
+api.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
 // Create a group and its first member (the creator). Joint groups also get a
 // single card account that every spend is charged to.
-app.post("/api/groups", async (req, res) => {
+api.post("/groups", createGroupLimiter, async (req, res) => {
   const { name, creatorName, type, cardName, participants } = req.body ?? {};
   if (!name || !creatorName) {
     return res.status(400).json({ error: "name and creatorName are required" });
@@ -135,7 +142,7 @@ app.post("/api/groups", async (req, res) => {
 });
 
 // Get a group (and its members) by invite code.
-app.get("/api/groups/:inviteCode", async (req, res) => {
+api.get("/groups/:inviteCode", async (req, res) => {
   const group = await prisma.group.findUnique({
     where: { inviteCode: req.params.inviteCode },
     include: { members: { where: { removedAt: null } } },
@@ -145,11 +152,11 @@ app.get("/api/groups/:inviteCode", async (req, res) => {
 });
 
 // Delete a group and all its data (members, accounts, expenses, messages).
-app.delete("/api/groups/:inviteCode", async (req, res) => {
+api.delete("/groups/:inviteCode", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
 
-  // Delete children first (SQLite FKs across account↔member aren't cascaded).
+  // Delete children first so this works consistently on SQLite and Postgres.
   await prisma.$transaction([
     prisma.split.deleteMany({ where: { expense: { groupId: group.id } } }),
     prisma.expense.deleteMany({ where: { groupId: group.id } }),
@@ -163,7 +170,7 @@ app.delete("/api/groups/:inviteCode", async (req, res) => {
 });
 
 // Join a group by name. Reuses an existing member with the same name.
-app.post("/api/groups/:inviteCode/join", async (req, res) => {
+api.post("/groups/:inviteCode/join", async (req, res) => {
   const { name } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name is required" });
 
@@ -184,7 +191,7 @@ app.post("/api/groups/:inviteCode/join", async (req, res) => {
 });
 
 // Add a participant to a group (name must be unique within the group).
-app.post("/api/groups/:inviteCode/members", async (req, res) => {
+api.post("/groups/:inviteCode/members", async (req, res) => {
   const { name } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
@@ -216,7 +223,7 @@ app.post("/api/groups/:inviteCode/members", async (req, res) => {
 });
 
 // Rename a participant.
-app.patch("/api/groups/:inviteCode/members/:memberId", async (req, res) => {
+api.patch("/groups/:inviteCode/members/:memberId", async (req, res) => {
   const { name } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
@@ -233,7 +240,7 @@ app.patch("/api/groups/:inviteCode/members/:memberId", async (req, res) => {
 // outright. If they have history, they can only be removed once their balance
 // is $0 (e.g. after "settle everyone up") — and then we soft-remove them so past
 // expenses stay intact and everyone else's balances are unchanged.
-app.delete("/api/groups/:inviteCode/members/:memberId", async (req, res) => {
+api.delete("/groups/:inviteCode/members/:memberId", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   const memberId = req.params.memberId;
@@ -270,7 +277,7 @@ app.delete("/api/groups/:inviteCode/members/:memberId", async (req, res) => {
 });
 
 // List messages in a group (oldest first).
-app.get("/api/groups/:inviteCode/messages", async (req, res) => {
+api.get("/groups/:inviteCode/messages", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
 
@@ -281,16 +288,53 @@ app.get("/api/groups/:inviteCode/messages", async (req, res) => {
   res.json({ messages });
 });
 
-const HELP_TEXT =
-  "I turn messages into expenses. Try:\n" +
-  "• \"paid 40 for dinner, split with Bob\"\n" +
-  "• \"100 for groceries on Joint Visa\"\n" +
-  "• \"balance\" to see who owes what";
+function expenseExample(
+  isJoint: boolean,
+  members: { id: string; name: string }[],
+  senderMemberId: string
+): string {
+  const sender =
+    members.find((m) => m.id === senderMemberId) ??
+    members[0] ??
+    { id: senderMemberId, name: "me" };
+  const other = members.find((m) => m.id !== sender.id);
+  const senderLabel = formatStructuredMemberName(sender.name);
+  const otherLabel = other
+    ? formatStructuredMemberName(other.name)
+    : undefined;
+  const forLabel = otherLabel
+    ? `${senderLabel} and ${otherLabel}`
+    : senderLabel;
+  const payerLabel = otherLabel ?? senderLabel;
+  return isJoint
+    ? `$40 on dinner, for ${forLabel}, split evenly`
+    : `$40 on dinner, paid by ${payerLabel}, for ${forLabel}, split evenly`;
+}
+
+function helpText(
+  isJoint: boolean,
+  members: { id: string; name: string }[],
+  senderMemberId: string,
+  cardName?: string
+): string {
+  const formula = isJoint
+    ? "[amount] on [what], for [people], split evenly"
+    : "[amount] on [what], paid by [payer], for [people], split evenly";
+  const payerNote = isJoint
+    ? `\n${cardName ?? "The shared card"} is always the payer.\n`
+    : "";
+  return (
+    `I turn messages into expenses.${payerNote}\nA reliable formula is:\n${formula}\n\n` +
+    `• \"${expenseExample(isJoint, members, senderMemberId)}\"\n` +
+    '• "balance" to see who owes what\n' +
+    '• "settle up" to see how to settle'
+  );
+}
 
 // Post a user message. The host runs the parser (relevance gate + rules) and
 // replies. Expenses come back as a proposal to confirm — they are NOT committed
 // here; the client confirms via POST /expenses.
-app.post("/api/groups/:inviteCode/messages", async (req, res) => {
+api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
   const { memberId, text } = req.body ?? {};
   if (!memberId || !text) {
     return res.status(400).json({ error: "memberId and text are required" });
@@ -366,9 +410,20 @@ app.post("/api/groups/:inviteCode/messages", async (req, res) => {
       members.length > 0 && members.every((m) => beneficiaryIds.has(m.id))
         ? "everyone"
         : splitMemberNames.join(", ");
+    const correctionNotice = e.corrections?.length
+      ? `${e.corrections
+          .map(
+            (correction) =>
+              `I matched “${correction.input}” to ${correction.matched}${
+                correction.role === "payer" ? " as the payer" : ""
+              }.`
+          )
+          .join(" ")} Please check the expense before confirming.`
+      : null;
     const notice =
-      [unknownNotice, splitSumNotice(e.amount, e.splits)].filter(Boolean).join(" ") ||
-      undefined;
+      [correctionNotice, unknownNotice, splitSumNotice(e.amount, e.splits)]
+        .filter(Boolean)
+        .join(" ") || undefined;
     return res.json({
       userMessage,
       proposal: {
@@ -458,7 +513,24 @@ app.post("/api/groups/:inviteCode/messages", async (req, res) => {
 
   // Help.
   if (result.kind === "command" && result.command === "help") {
-    return res.json({ userMessage, hostMessage: await hostReply(HELP_TEXT) });
+    return res.json({
+      userMessage,
+      hostMessage: await hostReply(
+        helpText(isJoint, members, String(memberId), accounts[0]?.name)
+      ),
+    });
+  }
+
+  // A structured formula matched, but a payer/beneficiary/card did not. Never
+  // send this to the LLM: explicit financial names must be resolved exactly.
+  if (result.kind === "invalid") {
+    return res.json({
+      userMessage,
+      hostMessage: await hostReply(
+        "I couldn't match every payer or person in that expense. Use names from the People panel, then try:\n" +
+          `\"${expenseExample(isJoint, members, String(memberId))}\"`
+      ),
+    });
   }
 
   // Couldn't confidently understand it (and the LLM, if on, wasn't sure either).
@@ -466,7 +538,11 @@ app.post("/api/groups/:inviteCode/messages", async (req, res) => {
     return res.json({
       userMessage,
       hostMessage: await hostReply(
-        "I'm not sure what you mean 🤔 Try something like \"paid 40 for dinner, split with Bob\", or type \"help\"."
+        `I'm not sure what you mean 🤔 Try \"${expenseExample(
+          isJoint,
+          members,
+          String(memberId)
+        )}\", or type \"help\".`
       ),
     });
   }
@@ -483,7 +559,7 @@ app.post("/api/groups/:inviteCode/messages", async (req, res) => {
 // --- accounts --------------------------------------------------------------
 
 // List accounts (payers that aren't necessarily people, e.g. a shared card).
-app.get("/api/groups/:inviteCode/accounts", async (req, res) => {
+api.get("/groups/:inviteCode/accounts", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   const accounts = await prisma.account.findMany({
@@ -493,7 +569,7 @@ app.get("/api/groups/:inviteCode/accounts", async (req, res) => {
   res.json({ accounts });
 });
 
-app.post("/api/groups/:inviteCode/accounts", async (req, res) => {
+api.post("/groups/:inviteCode/accounts", async (req, res) => {
   const { name, paidByMemberId } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
@@ -517,7 +593,7 @@ interface SplitInput {
   value?: number;
 }
 
-app.get("/api/groups/:inviteCode/expenses", async (req, res) => {
+api.get("/groups/:inviteCode/expenses", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   const expenses = await prisma.expense.findMany({
@@ -530,7 +606,7 @@ app.get("/api/groups/:inviteCode/expenses", async (req, res) => {
 
 // Create an expense (with its beneficiary splits) and post a summary card to
 // the group chat so it shows up in the conversation.
-app.post("/api/groups/:inviteCode/expenses", async (req, res) => {
+api.post("/groups/:inviteCode/expenses", async (req, res) => {
   const { amount, description, category, paidByMemberId, paidByAccountId, splits, createdVia } =
     req.body ?? {};
 
@@ -624,7 +700,7 @@ app.post("/api/groups/:inviteCode/expenses", async (req, res) => {
 
 // --- payments (settlements) ------------------------------------------------
 
-app.post("/api/groups/:inviteCode/payments", async (req, res) => {
+api.post("/groups/:inviteCode/payments", async (req, res) => {
   const { fromMemberId, toMemberId, amount } = req.body ?? {};
   const amt = Number(amount);
   if (!fromMemberId) return res.status(400).json({ error: "fromMemberId is required" });
@@ -665,7 +741,7 @@ app.post("/api/groups/:inviteCode/payments", async (req, res) => {
 });
 
 // Settle everyone up at once: record the payments that bring all balances to $0.
-app.post("/api/groups/:inviteCode/settle-all", async (req, res) => {
+api.post("/groups/:inviteCode/settle-all", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
 
@@ -714,7 +790,7 @@ app.post("/api/groups/:inviteCode/settle-all", async (req, res) => {
 
 // --- balances --------------------------------------------------------------
 
-app.get("/api/groups/:inviteCode/balances", async (req, res) => {
+api.get("/groups/:inviteCode/balances", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   const data = await computeGroupBalances(group.id);
@@ -726,8 +802,20 @@ app.get("/api/groups/:inviteCode/balances", async (req, res) => {
   res.json({ ...data, groupType: group.type, cardName });
 });
 
+// `/api/v1` is the stable public API. Keep the original `/api` paths working
+// during the web launch so any already-open client can finish its session.
+app.use("/api/v1", api);
+app.use(
+  "/api",
+  (_req, res, next) => {
+    res.setHeader("Deprecation", "true");
+    next();
+  },
+  api
+);
+
 app.listen(PORT, () => {
-  console.log(`SpliitAI server listening on http://localhost:${PORT}`);
+  console.log(`SplitPea server listening on http://localhost:${PORT}`);
   console.log(
     `Parser LLM fallback: ${isLLMEnabled() ? "ENABLED (Gemini)" : "disabled (set GEMINI_API_KEY to enable)"}`
   );

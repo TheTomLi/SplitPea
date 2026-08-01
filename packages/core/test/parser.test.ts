@@ -1,5 +1,9 @@
 // Run with: npx tsx packages/core/test/parser.test.ts
-import { parseMessage, type ParseContext } from "../src/parser";
+import {
+  formatStructuredMemberName,
+  parseMessage,
+  type ParseContext,
+} from "../src/parser";
 
 let passed = 0;
 let failed = 0;
@@ -22,6 +26,317 @@ const ctx: ParseContext = {
   accounts: [{ id: "visa", name: "Joint Visa" }],
   senderMemberId: "alice",
 };
+
+// --- Guided expense formula ----------------------------------------------
+// The app teaches this form, so it has a strict parser of its own. Explicit
+// payer and beneficiary names must be resolved exactly; the sender is not
+// silently added when they are not named.
+const formulaCtx: ParseContext = {
+  members: [
+    { id: "alice", name: "Alice" },
+    { id: "tom", name: "Tom" },
+    { id: "emma", name: "Emma" },
+  ],
+  accounts: [{ id: "visa", name: "Joint Visa" }],
+  senderMemberId: "alice",
+  mode: "split",
+};
+
+{
+  const r = parseMessage(
+    "$40 on dinner, paid by Emma, for Tom and Emma, split evenly.",
+    formulaCtx
+  );
+  check("formula: kind", r.kind === "expense", r);
+  if (r.kind === "expense") {
+    check("formula: amount", r.expense.amount === 40, r.expense.amount);
+    check(
+      "formula: description",
+      r.expense.description === "dinner",
+      r.expense.description
+    );
+    check("formula: payer Emma", r.expense.paidByMemberId === "emma", r.expense);
+    check(
+      "formula: only named beneficiaries",
+      JSON.stringify(r.expense.splits.map((s) => s.memberId)) ===
+        JSON.stringify(["tom", "emma"]),
+      r.expense.splits
+    );
+    check("formula: even splits", r.expense.splits.every((s) => s.mode === "even"));
+  }
+}
+
+{
+  const r = parseMessage(
+    "40 bucks on dinner. paid by Emma, for tom and Emma, split evenly.",
+    formulaCtx
+  );
+  check(
+    "formula: natural punctuation and bucks",
+    r.kind === "expense" &&
+      r.expense.amount === 40 &&
+      r.expense.paidByMemberId === "emma" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "tom,emma",
+    r
+  );
+}
+
+{
+  const typoCtx: ParseContext = {
+    members: [
+      { id: "kevin", name: "Kevin" },
+      { id: "serena", name: "Serena" },
+    ],
+    accounts: [],
+    senderMemberId: "serena",
+    mode: "split",
+  };
+  const r = parseMessage(
+    "1000 bucks on hotels, paid by Kelvin, for both of us, split evenly",
+    typoCtx
+  );
+  check(
+    "formula: unique payer typo is corrected",
+    r.kind === "expense" &&
+      r.expense.amount === 1000 &&
+      r.expense.paidByMemberId === "kevin" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "kevin,serena" &&
+      r.expense.corrections?.length === 1 &&
+      r.expense.corrections[0].input === "Kelvin" &&
+      r.expense.corrections[0].matched === "Kevin" &&
+      r.expense.corrections[0].role === "payer",
+    r
+  );
+
+  const beneficiaryTypo = parseMessage(
+    "$40 on dinner, paid by Serena, for Kevin and Serna, split evenly",
+    typoCtx
+  );
+  check(
+    "formula: unique beneficiary typo is corrected",
+    beneficiaryTypo.kind === "expense" &&
+      beneficiaryTypo.expense.splits
+        .map((s) => s.memberId)
+        .join(",") === "kevin,serena" &&
+      beneficiaryTypo.expense.corrections?.[0]?.input === "Serna" &&
+      beneficiaryTypo.expense.corrections?.[0]?.matched === "Serena" &&
+      beneficiaryTypo.expense.corrections?.[0]?.role === "beneficiary",
+    beneficiaryTypo
+  );
+}
+
+check(
+  "formula: ambiguous payer typo is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Levin, for Alice, split evenly",
+    {
+      members: [
+        { id: "alice", name: "Alice" },
+        { id: "kevin", name: "Kevin" },
+        { id: "devin", name: "Devin" },
+      ],
+      accounts: [],
+      senderMemberId: "alice",
+      mode: "split",
+    }
+  ).kind === "invalid"
+);
+
+check(
+  "formula: both of us is limited to two-person groups",
+  parseMessage(
+    "$40 on dinner, paid by Alice, for both of us, split evenly",
+    formulaCtx
+  ).kind === "invalid"
+);
+
+{
+  const r = parseMessage(
+    "$40 on dinner paid by Emma for Tom and Emma split evenly",
+    formulaCtx
+  );
+  check(
+    "formula: punctuation is optional",
+    r.kind === "expense" &&
+      r.expense.paidByMemberId === "emma" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "tom,emma",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "$40 on dinner, paid by Emma, for Tom, split evenly",
+    formulaCtx
+  );
+  check(
+    "formula: one beneficiary stays one beneficiary",
+    r.kind === "expense" &&
+      r.expense.splits.length === 1 &&
+      r.expense.splits[0].memberId === "tom",
+    r
+  );
+}
+
+check(
+  "formula: unknown payer is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Lydia, for Tom and Emma, split evenly",
+    formulaCtx
+  ).kind === "invalid"
+);
+check(
+  "formula: unknown beneficiary is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Emma, for Tom and Lydia, split evenly",
+    formulaCtx
+  ).kind === "invalid"
+);
+check(
+  "formula: misspelled strategy is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Emma, for Tom and Emma, split evenley",
+    formulaCtx
+  ).kind === "invalid"
+);
+check(
+  "formula: missing strategy is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Emma, for Tom and Emma",
+    formulaCtx
+  ).kind === "invalid"
+);
+
+{
+  const r = parseMessage(
+    "$40 on dinner, paid by me, for Tom and me, split evenly",
+    formulaCtx
+  );
+  check(
+    "formula: me aliases the sender",
+    r.kind === "expense" &&
+      r.expense.paidByMemberId === "alice" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "alice,tom",
+    r
+  );
+}
+
+{
+  const unicodeCtx: ParseContext = {
+    members: [
+      { id: "tom", name: "Tom" },
+      { id: "emma", name: "Émma" },
+      { id: "li", name: "李" },
+    ],
+    accounts: [],
+    senderMemberId: "tom",
+    mode: "split",
+  };
+  const r = parseMessage(
+    "$40 on dinner, paid by Émma, for Tom and 李, split evenly",
+    unicodeCtx
+  );
+  check(
+    "formula: accented and CJK names",
+    r.kind === "expense" &&
+      r.expense.paidByMemberId === "emma" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "tom,li",
+    r
+  );
+}
+
+check(
+  "formula: sender alias must belong to group",
+  parseMessage(
+    "$40 on dinner, paid by Tom, for me and Tom, split evenly",
+    {
+      members: [{ id: "tom", name: "Tom" }],
+      accounts: [],
+      senderMemberId: "outside-group",
+      mode: "split",
+    }
+  ).kind === "invalid"
+);
+
+check(
+  "formula: ambiguous payer is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Jordan, for Alice, split evenly",
+    {
+      members: [
+        { id: "alice", name: "Alice" },
+        { id: "jordan", name: "Jordan" },
+      ],
+      accounts: [{ id: "jordan-card", name: "Jordan" }],
+      senderMemberId: "alice",
+      mode: "split",
+    }
+  ).kind === "invalid"
+);
+
+check(
+  "formula: ambiguous beneficiary is invalid",
+  parseMessage(
+    "$40 on dinner, paid by Alice, for Emma, split evenly",
+    {
+      members: [
+        { id: "alice", name: "Alice" },
+        { id: "emma-1", name: "Emma" },
+        { id: "emma-2", name: "emma" },
+      ],
+      accounts: [],
+      senderMemberId: "alice",
+      mode: "split",
+    }
+  ).kind === "invalid"
+);
+
+{
+  const reservedCtx: ParseContext = {
+    members: [
+      { id: "alice", name: "Alice" },
+      { id: "literal-me", name: "Me" },
+      { id: "literal-everyone", name: "Everyone" },
+    ],
+    accounts: [],
+    senderMemberId: "alice",
+    mode: "split",
+  };
+  check(
+    "formula: reserved names are quoted for examples",
+    formatStructuredMemberName("Me") === '"Me"' &&
+      formatStructuredMemberName("Everyone") === '"Everyone"' &&
+      formatStructuredMemberName("Emma") === "Emma"
+  );
+
+  const r = parseMessage(
+    '$40 on dinner, paid by "Me", for Alice and "Everyone", split evenly',
+    reservedCtx
+  );
+  check(
+    "formula: quoted reserved names resolve literally",
+    r.kind === "expense" &&
+      r.expense.paidByMemberId === "literal-me" &&
+      r.expense.splits.map((s) => s.memberId).join(",") ===
+        "alice,literal-everyone",
+    r
+  );
+
+  check(
+    "formula: unquoted reserved payer is invalid",
+    parseMessage(
+      "$40 on dinner, paid by Me, for Alice, split evenly",
+      reservedCtx
+    ).kind === "invalid"
+  );
+  check(
+    "formula: unquoted reserved beneficiary is invalid",
+    parseMessage(
+      "$40 on dinner, paid by Alice, for Alice and Everyone, split evenly",
+      reservedCtx
+    ).kind === "invalid"
+  );
+}
 
 // Basic expense, default split among everyone.
 {
@@ -102,6 +417,31 @@ const jctx: ParseContext = {
   mode: "joint",
   cardAccountId: "card",
 };
+
+{
+  const r = parseMessage(
+    "$40 on dinner, for Alice and Bob, split evenly",
+    jctx
+  );
+  check(
+    "formula joint: card payer and named beneficiaries",
+    r.kind === "expense" &&
+      r.expense.paidByMemberId == null &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => s.memberId).join(",") === "alice,bob",
+    r
+  );
+}
+
+check(
+  "formula joint: malformed strategy is invalid",
+  parseMessage("$40 on dinner, for Alice and Bob, split evenley", jctx).kind ===
+    "invalid"
+);
+check(
+  "formula joint: missing separators and strategy is invalid",
+  parseMessage("$40 on dinner for Alice and Bob", jctx).kind === "invalid"
+);
 
 // "I spent X" → charged to card, only the sender owes.
 {

@@ -34,6 +34,11 @@ export interface ParsedSplit {
   mode: SplitMode;
   value: number;
 }
+export interface ParsedNameCorrection {
+  input: string;
+  matched: string;
+  role: "payer" | "beneficiary";
+}
 export interface ParsedExpense {
   amount: number;
   description: string;
@@ -41,6 +46,8 @@ export interface ParsedExpense {
   paidByMemberId?: string | null;
   paidByAccountId?: string | null;
   splits: ParsedSplit[];
+  /** Conservative typo corrections made while reading the guided formula. */
+  corrections?: ParsedNameCorrection[];
 }
 
 export type ParseCommand = "balance" | "help" | "settleAll";
@@ -56,13 +63,80 @@ export type ParseResult =
   | { kind: "expense"; expense: ParsedExpense }
   | { kind: "settlement"; settlement: ParsedSettlement }
   | { kind: "command"; command: ParseCommand }
+  | { kind: "invalid" }
   | { kind: "unparsed" }
   | { kind: "irrelevant" };
 
 const MAX_LEN = 200;
+const STRUCTURED_RESERVED_NAMES = new Set([
+  "me",
+  "i",
+  "myself",
+  "everyone",
+  "everybody",
+  "all",
+  "both of us",
+]);
+
+/** Quote a display name only when it would collide with formula keywords. */
+export function formatStructuredMemberName(name: string): string {
+  const trimmed = name.trim();
+  return STRUCTURED_RESERVED_NAMES.has(trimmed.toLocaleLowerCase())
+    ? `"${trimmed}"`
+    : trimmed;
+}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeStructuredName(value: string): string {
+  return value.trim().normalize("NFKC").toLocaleLowerCase();
+}
+
+/**
+ * A deliberately narrow typo check: one insertion, deletion, substitution, or
+ * adjacent transposition. Short names are excluded because one edit is too
+ * likely to point at the wrong person.
+ */
+function isSingleNameTypo(input: string, candidate: string): boolean {
+  const a = Array.from(normalizeStructuredName(input));
+  const b = Array.from(normalizeStructuredName(candidate));
+  if (Math.min(a.length, b.length) < 4 || Math.abs(a.length - b.length) > 1) {
+    return false;
+  }
+
+  if (a.length === b.length) {
+    const mismatches: number[] = [];
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) mismatches.push(i);
+      if (mismatches.length > 2) return false;
+    }
+    if (mismatches.length === 1) return true;
+    return (
+      mismatches.length === 2 &&
+      mismatches[1] === mismatches[0] + 1 &&
+      a[mismatches[0]] === b[mismatches[1]] &&
+      a[mismatches[1]] === b[mismatches[0]]
+    );
+  }
+
+  const longer = a.length > b.length ? a : b;
+  const shorter = a.length > b.length ? b : a;
+  let longIndex = 0;
+  let shortIndex = 0;
+  let skipped = false;
+  while (longIndex < longer.length && shortIndex < shorter.length) {
+    if (longer[longIndex] === shorter[shortIndex]) {
+      longIndex++;
+      shortIndex++;
+      continue;
+    }
+    if (skipped) return false;
+    skipped = true;
+    longIndex++;
+  }
+  return true;
 }
 
 /** Resolve a spoken name token to a member id ("me"/"i"/"myself" = sender). */
@@ -255,6 +329,377 @@ function parseSettlement(
   return { fromMemberId: from, toMemberId: to, amount };
 }
 
+/**
+ * Resolve an explicit beneficiary clause such as "Tom and Emma". Unlike the
+ * looser legacy split-clause parser, this never adds the sender implicitly and
+ * rejects leftover words rather than silently dropping an unknown person.
+ */
+function resolveStructuredMembers(
+  phrase: string,
+  ctx: ParseContext
+): { memberIds: string[]; corrections: ParsedNameCorrection[] } | null {
+  if (ctx.members.length === 0) return null;
+
+  interface Candidate {
+    label: string;
+    memberIds: string[];
+    ambiguous?: boolean;
+  }
+
+  // Case-insensitive duplicate names are unsafe in an explicit formula. Keep
+  // them as one ambiguous candidate so referring to that name fails closed.
+  const memberGroups = new Map<string, ParseContextMember[]>();
+  for (const member of ctx.members) {
+    const label = member.name.trim();
+    if (!label) continue;
+    const key = label.toLocaleLowerCase();
+    const group = memberGroups.get(key) ?? [];
+    group.push(member);
+    memberGroups.set(key, group);
+  }
+
+  const candidates: Candidate[] = [
+    ...(ctx.members.length === 2
+      ? [
+          {
+            label: "both of us",
+            memberIds: ctx.members.map((m) => m.id),
+            ambiguous: memberGroups.has("both of us"),
+          },
+        ]
+      : []),
+    {
+      label: "everyone",
+      memberIds: ctx.members.map((m) => m.id),
+      ambiguous: memberGroups.has("everyone"),
+    },
+    {
+      label: "everybody",
+      memberIds: ctx.members.map((m) => m.id),
+      ambiguous: memberGroups.has("everybody"),
+    },
+    {
+      label: "all",
+      memberIds: ctx.members.map((m) => m.id),
+      ambiguous: memberGroups.has("all"),
+    },
+  ];
+
+  if (ctx.members.some((m) => m.id === ctx.senderMemberId)) {
+    candidates.push(
+      {
+        label: "myself",
+        memberIds: [ctx.senderMemberId],
+        ambiguous: memberGroups.has("myself"),
+      },
+      {
+        label: "me",
+        memberIds: [ctx.senderMemberId],
+        ambiguous: memberGroups.has("me"),
+      },
+      {
+        label: "i",
+        memberIds: [ctx.senderMemberId],
+        ambiguous: memberGroups.has("i"),
+      }
+    );
+  }
+
+  for (const group of memberGroups.values()) {
+    const name = group[0].name.trim();
+    candidates.push({
+      label: formatStructuredMemberName(name),
+      memberIds: group.map((m) => m.id),
+      ambiguous: group.length !== 1,
+    });
+  }
+
+  // Matching full known labels from left to right works for accented, CJK,
+  // emoji, punctuation, and multi-word names. Longest-first also preserves a
+  // member named "Tom and Jerry" before considering shorter alternatives.
+  candidates.sort((a, b) => b.label.length - a.label.length);
+  const separator =
+    /^(?:\s*[,;&+]\s*(?:(?:and|with)\s+)?|\s+(?:and|with)\s+)/iu;
+
+  function consume(
+    remaining: string,
+    selected: Set<string>
+  ): Set<string> | null {
+    const input = remaining.replace(/^\s+/u, "");
+
+    for (const candidate of candidates) {
+      const match = input.match(
+        new RegExp(`^${escapeRegExp(candidate.label)}`, "iu")
+      );
+      if (!match) continue;
+
+      const afterLabel = input.slice(match[0].length);
+      const atEnd = afterLabel.trim().length === 0;
+      const separatorMatch = atEnd ? null : afterLabel.match(separator);
+      if (!atEnd && !separatorMatch) continue;
+      if (candidate.ambiguous) return null;
+
+      const nextSelected = new Set(selected);
+      candidate.memberIds.forEach((id) => nextSelected.add(id));
+      if (atEnd) return nextSelected;
+
+      const parsed = consume(
+        afterLabel.slice(separatorMatch![0].length),
+        nextSelected
+      );
+      if (parsed) return parsed;
+    }
+
+    return null;
+  }
+
+  const ids = consume(phrase.trim(), new Set<string>());
+  if (ids && ids.size > 0) {
+    const resolved = ctx.members.map((m) => m.id).filter((id) => ids.has(id));
+    return resolved.length === ids.size
+      ? { memberIds: resolved, corrections: [] }
+      : null;
+  }
+
+  // If exact parsing failed, retry delimiter-separated individual names with
+  // a unique one-edit match. Never fuzzy-match quoted or reserved words.
+  const parts = phrase
+    .trim()
+    .split(/\s*(?:[,;&+]|\b(?:and|with)\b)\s*/iu)
+    .map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => !part)) return null;
+
+  const selected = new Set<string>();
+  const corrections: ParsedNameCorrection[] = [];
+  for (const rawPart of parts) {
+    const quoted = rawPart.match(/^(?:"([^"]+)"|“([^”]+)”)$/u);
+    const value = (quoted?.[1] ?? quoted?.[2] ?? rawPart).trim();
+    const token = normalizeStructuredName(value);
+
+    if (!quoted && (token === "me" || token === "i" || token === "myself")) {
+      if (memberGroups.has(token)) return null;
+      if (!ctx.members.some((m) => m.id === ctx.senderMemberId)) return null;
+      selected.add(ctx.senderMemberId);
+      continue;
+    }
+    if (!quoted && STRUCTURED_RESERVED_NAMES.has(token)) return null;
+
+    const exactMembers = ctx.members.filter(
+      (member) => normalizeStructuredName(member.name) === token
+    );
+    if (exactMembers.length === 1) {
+      selected.add(exactMembers[0].id);
+      continue;
+    }
+    if (exactMembers.length > 1 || quoted) return null;
+
+    const fuzzyMembers = ctx.members.filter(
+      (member) =>
+        !STRUCTURED_RESERVED_NAMES.has(normalizeStructuredName(member.name)) &&
+        isSingleNameTypo(value, member.name)
+    );
+    if (fuzzyMembers.length !== 1) return null;
+    selected.add(fuzzyMembers[0].id);
+    corrections.push({
+      input: value,
+      matched: fuzzyMembers[0].name.trim(),
+      role: "beneficiary",
+    });
+  }
+
+  const resolved = ctx.members
+    .map((member) => member.id)
+    .filter((id) => selected.has(id));
+  return resolved.length === selected.size && resolved.length > 0
+    ? { memberIds: resolved, corrections }
+    : null;
+}
+
+function resolveStructuredPayer(
+  phrase: string,
+  ctx: ParseContext
+): {
+  memberId: string | null;
+  accountId: string | null;
+  correction?: ParsedNameCorrection;
+} | null {
+  const rawToken = phrase.trim();
+  const quoted = rawToken.match(/^(?:"([^"]+)"|“([^”]+)”)$/u);
+  const token = (quoted?.[1] ?? quoted?.[2] ?? rawToken)
+    .trim()
+    .toLocaleLowerCase();
+  if (!token) return null;
+
+  const matchingMembers = ctx.members.filter(
+    (m) => m.name.trim().toLocaleLowerCase() === token
+  );
+  const matchingAccounts = ctx.accounts.filter(
+    (a) => a.name.trim().toLocaleLowerCase() === token
+  );
+
+  if (
+    !quoted &&
+    (token === "me" || token === "i" || token === "myself")
+  ) {
+    if (matchingMembers.length > 0 || matchingAccounts.length > 0) return null;
+    return ctx.members.some((m) => m.id === ctx.senderMemberId)
+      ? { memberId: ctx.senderMemberId, accountId: null }
+      : null;
+  }
+
+  // The other reserved words only have beneficiary semantics. Real payers with
+  // one of those names must use the quoted form generated by the UI.
+  if (!quoted && STRUCTURED_RESERVED_NAMES.has(token)) return null;
+  if (matchingMembers.length + matchingAccounts.length === 1) {
+    return matchingMembers[0]
+      ? { memberId: matchingMembers[0].id, accountId: null }
+      : { memberId: null, accountId: matchingAccounts[0].id };
+  }
+  if (matchingMembers.length + matchingAccounts.length > 1 || quoted) return null;
+
+  const fuzzyMatches = [
+    ...ctx.members.map((member) => ({
+      memberId: member.id,
+      accountId: null,
+      name: member.name,
+    })),
+    ...ctx.accounts.map((account) => ({
+      memberId: null,
+      accountId: account.id,
+      name: account.name,
+    })),
+  ].filter(
+    (candidate) =>
+      !STRUCTURED_RESERVED_NAMES.has(normalizeStructuredName(candidate.name)) &&
+      isSingleNameTypo(rawToken, candidate.name)
+  );
+  if (fuzzyMatches.length !== 1) return null;
+
+  const fuzzyMatch = fuzzyMatches[0];
+  return {
+    memberId: fuzzyMatch.memberId,
+    accountId: fuzzyMatch.accountId,
+    correction: {
+      input: rawToken,
+      matched: fuzzyMatch.name.trim(),
+      role: "payer",
+    },
+  };
+}
+
+/**
+ * Parse the teachable, explicit expense formula shown by the UI:
+ *   "$40 on dinner, paid by Emma, for Tom and Emma, split evenly"
+ * Joint-card groups omit the payer clause because their card is always payer.
+ *
+ * Returning `invalid` for a malformed explicit formula is deliberate: unlike
+ * `unparsed`, it will not be handed to the LLM. Once a user explicitly says
+ * "paid by" / "for", guessing at an unknown name would be unsafe.
+ */
+function parseStructuredExpense(
+  raw: string,
+  ctx: ParseContext
+): ParseResult | null {
+  const match = raw.match(
+    /^\s*\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?\s+(?:on|for)\s+(.+?)(?:\s*[,.;:—–·-]\s*|\s+)(?:paid\s+by\s+(.+?)(?:\s*[,.;:—–·-]\s*|\s+))?for\s+(.+?)(?:\s*[,.;:—–·-]\s*|\s+)split\s+(?:evenly|even|equally)\s*[.!?]*$/i
+  );
+  if (!match) return null;
+
+  const amount = parseFloat(match[1].replace(",", "."));
+  const description = match[2]
+    .trim()
+    .replace(/^[,.;:\s]+|[,.;:\s]+$/g, "");
+  const payerPhrase = match[3]?.trim();
+  const beneficiaries = resolveStructuredMembers(match[4], ctx);
+
+  if (!Number.isFinite(amount) || amount <= 0 || !description || !beneficiaries) {
+    return { kind: "invalid" };
+  }
+
+  const mode: GroupType = ctx.mode ?? "split";
+  let paidByMemberId: string | null = null;
+  let paidByAccountId: string | null = null;
+  const corrections = [...beneficiaries.corrections];
+
+  if (mode === "joint") {
+    if (!ctx.cardAccountId) return { kind: "invalid" };
+
+    // The joint formula normally omits payer. If supplied, it must name the
+    // group's card rather than contradicting the group model.
+    if (payerPhrase) {
+      const namedAccounts = ctx.accounts.filter(
+        (a) =>
+          a.name.trim().toLocaleLowerCase() ===
+          payerPhrase.toLocaleLowerCase()
+      );
+      if (
+        (namedAccounts.length !== 1 ||
+          namedAccounts[0].id !== ctx.cardAccountId) &&
+        !/^(the\s+)?(shared\s+)?card$/i.test(payerPhrase)
+      ) {
+        return { kind: "invalid" };
+      }
+    }
+    paidByAccountId = ctx.cardAccountId;
+  } else {
+    // An explicit payer is required in the split-bills version of the formula.
+    if (!payerPhrase) return { kind: "invalid" };
+    const payer = resolveStructuredPayer(payerPhrase, ctx);
+    if (!payer) return { kind: "invalid" };
+    paidByMemberId = payer.memberId;
+    paidByAccountId = payer.accountId;
+    if (payer.correction) corrections.push(payer.correction);
+  }
+
+  return {
+    kind: "expense",
+    expense: {
+      amount,
+      description,
+      category: null,
+      paidByMemberId,
+      paidByAccountId,
+      splits: beneficiaries.memberIds.map((memberId) => ({
+        memberId,
+        mode: "even",
+        value: 1,
+      })),
+      ...(corrections.length > 0 ? { corrections } : {}),
+    },
+  };
+}
+
+function looksLikeStructuredExpense(
+  raw: string,
+  ctx: ParseContext
+): boolean {
+  if (/\b(?:paid|payed)\s+by\b/i.test(raw)) return true;
+
+  const startsWithFormulaAmount =
+    /^\s*\$?\s*\d+(?:[.,]\d{1,2})?\s*(?:bucks?|dollars?)?\s+(?:on|for)\s+/i.test(
+      raw
+    );
+  if (!startsWithFormulaAmount) return false;
+
+  const startsWithAmountOn =
+    /^\s*\$?\s*\d+(?:[.,]\d{1,2})?\s*(?:bucks?|dollars?)?\s+on\s+/i.test(
+      raw
+    );
+  const hasStructuredForClause =
+    /[,.;:—–·-]\s*for\s+/i.test(raw) ||
+    (startsWithAmountOn && /\bfor\b[\s\S]*\bsplit\b/i.test(raw));
+  if (hasStructuredForClause) return true;
+
+  // Joint-mode formulas have no payer clause, so even a missing split tail can
+  // otherwise become a one-person legacy expense with beneficiary names buried
+  // in the description.
+  return (
+    (ctx.mode ?? "split") === "joint" &&
+    startsWithAmountOn &&
+    /\s+for\s+\S+/iu.test(raw)
+  );
+}
+
 export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   const raw = text.trim();
   const lower = raw.toLowerCase();
@@ -311,6 +756,15 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
 
   const amount = parseFloat(amountMatch[1].replace(",", "."));
   if (!Number.isFinite(amount) || amount <= 0) return { kind: "unparsed" };
+
+  // Prefer the explicit formula before the older greedy rules. It carries
+  // stronger payer/beneficiary intent and must not be mistaken for a settlement.
+  const structured = parseStructuredExpense(raw, ctx);
+  if (structured) return structured;
+
+  // A message that clearly attempted the guided formula must not fall through
+  // to the looser legacy rules, which could silently change its payer or people.
+  if (looksLikeStructuredExpense(raw, ctx)) return { kind: "invalid" };
 
   // A non-even split ("20 to tom, 30 to emma", "me 60% emma 40%", "6 slices…").
   const custom = detectCustomSplits(raw, lower, ctx);

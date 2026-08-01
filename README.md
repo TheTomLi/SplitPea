@@ -1,4 +1,4 @@
-# SpliitAI
+# SplitPea
 
 A chat-first, no-login bill-splitting app. Type or speak an expense in natural
 language and a host bot turns it into a structured entry. See
@@ -12,13 +12,13 @@ except screen layouts.
 ```
 packages/core         shared TypeScript types (no framework deps)
 packages/api-client   typed fetch client for the server
-apps/server           Express + Prisma + SQLite API
+apps/server           Express + Prisma API (SQLite dev, Neon Postgres production)
 apps/app              Expo Universal app (web now; iOS/Android later)
 ```
 
 ## Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 22 and npm
 - No database install needed for dev — SQLite is just a file.
 
 ## Setup (first time)
@@ -53,9 +53,9 @@ tab and join with the invite code to see the group chat with two people.
   Bob 20" (person-to-person). Shared card: "I paid the card 50" / "I settled 50".
   Confirm card → balances update. Leaving is blocked until your balance is $0.
 - **M2 (done)** — relevance gate + deterministic parser (free, no LLM). Type
-  "paid 40 for dinner, split with Bob" → host proposes an expense card you
-  Confirm / Edit / Cancel. Also "balance"/"settle"/"help" commands. Irrelevant
-  chatter gets a free canned reply.
+  "$40 on dinner, paid by Emma, for Tom and Emma, split evenly" → host proposes
+  an expense card you Confirm / Edit / Cancel. Also "balance"/"settle"/"help"
+  commands. Irrelevant chatter gets a free canned reply.
 - **M3 (done)** — LLM fallback (Gemini Flash) for messy input the rules can't
   parse. Off by default; set `GEMINI_API_KEY` in `apps/server/.env` to enable.
   Only "unparsed" messages reach the model; output still goes through a confirm
@@ -66,8 +66,13 @@ tab and join with the invite code to see the group chat with two people.
 
 ## Notes
 
-- Dev DB is SQLite (`apps/server/.env` → `DATABASE_URL`). Switch to Postgres at
-  deployment time by changing the datasource provider + URL.
+- Local development uses SQLite through `schema.sqlite.prisma`; production uses
+  Neon PostgreSQL through `schema.prisma`. See [`DEPLOY.md`](./DEPLOY.md) for the
+  `getsplitpea.com` launch checklist.
+- The stable public API prefix is `/api/v1`. The original `/api` prefix remains
+  temporarily available for already-open clients.
+- SplitPea intentionally has no login for the initial web launch. An invite link
+  grants access to that group, so only share it with people you trust.
 - For testing on a physical device later, set `apps/app/src/config.ts`
   `API_BASE_URL` to your machine's LAN IP instead of `localhost`.
 ```

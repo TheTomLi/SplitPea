@@ -1,4 +1,4 @@
-// Balance engine — the heart of SpliitAI.
+// Balance engine — the heart of SplitPea.
 //
 // Given the members, accounts, and expenses of a group, it computes each
 // member's net position (what they paid minus what they owe) and a minimal set

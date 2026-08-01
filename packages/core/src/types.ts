@@ -1,4 +1,4 @@
-// Shared domain types for SpliitAI.
+// Shared domain types for SplitPea.
 // Pure TypeScript — no framework or runtime dependencies — so these are reused
 // verbatim by the server, the api-client, and the Expo (web + mobile) app.
 

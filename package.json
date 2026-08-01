@@ -1,16 +1,19 @@
 {
-  "name": "spliitai",
+  "name": "splitpea",
   "version": "0.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "scripts": {
-    "server": "npm run dev --workspace @spliitai/server",
-    "app": "npm run web --workspace @spliitai/app",
-    "db:push": "npm run db:push --workspace @spliitai/server",
-    "db:reset": "npm run db:reset --workspace @spliitai/server"
+    "server": "npm run dev --workspace @splitpea/server",
+    "app": "npm run web --workspace @splitpea/app",
+    "db:push": "npm run db:push --workspace @splitpea/server",
+    "db:reset": "npm run db:reset --workspace @splitpea/server"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

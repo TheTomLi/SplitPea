@@ -1,0 +1,11 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "npm ci"
+
+[deploy]
+preDeployCommand = "npm run db:push:prod --workspace @splitpea/server"
+startCommand = "npm run start:prod --workspace @splitpea/server"
+healthcheckPath = "/api/v1/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
