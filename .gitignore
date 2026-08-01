@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+.expo/
+web-build/
+*.log
+.env
+.DS_Store
+
+# Local AI-tool permissions
+.claude/settings.local.json
+
+# SQLite dev database
+apps/server/prisma/*.db
+apps/server/prisma/*.db-journal
+
+# Prisma generated client
+packages/**/generated/
+apps/**/generated/

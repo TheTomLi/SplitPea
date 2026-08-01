@@ -1,0 +1,106 @@
+// SpliitAI database schema.
+// Provider is SQLite for local dev; swapped to postgresql at deployment time.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Group {
+  id         String    @id @default(cuid())
+  name       String
+  type       String    @default("split") // 'split' | 'joint'
+  inviteCode String    @unique
+  createdAt  DateTime  @default(now())
+  members    Member[]
+  accounts   Account[]
+  expenses   Expense[]
+  messages   Message[]
+  payments   Payment[]
+}
+
+model Member {
+  id        String    @id @default(cuid())
+  groupId   String
+  name      String
+  // Set when the person is removed from the group but still appears in past
+  // expenses. Their history stays intact; they're hidden from the active roster.
+  removedAt DateTime?
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  messages     Message[]
+  splits       Split[]
+  expensesPaid Expense[] @relation("ExpensePaidByMember")
+  accountsPaid Account[] @relation("AccountPaidByMember")
+}
+
+// A payer that may not be a person: a shared card, a cash pool, etc.
+model Account {
+  id             String  @id @default(cuid())
+  groupId        String
+  name           String
+  paidByMemberId String?
+  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  paidByMember   Member? @relation("AccountPaidByMember", fields: [paidByMemberId], references: [id])
+
+  expensesPaid Expense[] @relation("ExpensePaidByAccount")
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  groupId     String
+  amount      Float
+  description String
+  category    String?
+  date        DateTime @default(now())
+  createdVia  String   @default("manual") // 'manual' | 'rules' | 'llm'
+  createdAt   DateTime @default(now())
+
+  // Who fronted the money — a member OR an account (exactly one is set).
+  paidByMemberId  String?
+  paidByAccountId String?
+
+  group         Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  paidByMember  Member?  @relation("ExpensePaidByMember", fields: [paidByMemberId], references: [id])
+  paidByAccount Account? @relation("ExpensePaidByAccount", fields: [paidByAccountId], references: [id])
+  splits        Split[]
+}
+
+// One beneficiary allocation of an expense (who should bear the cost).
+model Split {
+  id        String  @id @default(cuid())
+  expenseId String
+  memberId  String
+  mode      String  @default("even") // 'even' | 'shares' | 'percent' | 'exact'
+  value     Float   @default(0)
+  expense   Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  member    Member  @relation(fields: [memberId], references: [id])
+}
+
+// A settlement/repayment. `toMemberId` null means paid to the card (joint mode).
+model Payment {
+  id           String   @id @default(cuid())
+  groupId      String
+  fromMemberId String
+  toMemberId   String? // null = the shared card
+  amount       Float
+  createdAt    DateTime @default(now())
+  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  groupId     String
+  memberId    String?
+  role        String // 'user' | 'host'
+  text        String
+  cardType    String?
+  cardPayload String? // JSON string
+  createdAt   DateTime @default(now())
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  member      Member?  @relation(fields: [memberId], references: [id])
+}
