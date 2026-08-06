@@ -22,6 +22,8 @@ export interface NewExpense {
   paidByAccountId?: string;
   splits: SplitInput[];
   createdVia?: "manual" | "rules" | "llm";
+  /** Calendar date in YYYY-MM-DD form. Defaults to today. */
+  date?: string;
 }
 
 export interface MemberBalanceView {
@@ -38,6 +40,33 @@ export interface SettlementView {
   amount: number;
   fromName: string;
   toName: string;
+}
+
+export interface StatementMemberView {
+  memberId: string;
+  name: string;
+  amount: number;
+}
+
+export interface StatementPeriodView {
+  from: string;
+  to: string;
+  expenseCount: number;
+  total: number;
+  members: StatementMemberView[];
+}
+
+export interface HistoryEntry {
+  id: string;
+  type: "expense" | "payment";
+  date: string;
+  amount: number;
+  description: string;
+  payerLabel: string;
+  forLabel?: string;
+  splitBreakdown?: { name: string; amount: number }[];
+  statementFrom?: string | null;
+  statementTo?: string | null;
 }
 
 /** An ephemeral, not-yet-committed expense the host parsed from a message. */
@@ -75,6 +104,7 @@ export interface PostMessageResult {
   proposal?: ExpenseProposal;
   settlementProposal?: SettlementProposal;
   settleAllProposal?: { count: number };
+  statementPeriod?: StatementPeriodView;
 }
 
 // Typed client for the SplitPea server. Uses the global `fetch`, which exists
@@ -82,6 +112,11 @@ export interface PostMessageResult {
 // across web, mobile, and server-side tests.
 
 const API_PREFIX = "/api/v1";
+
+function currentLocalDate(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
 
 export interface ApiClientOptions {
   /** Base URL of the server, e.g. "http://localhost:4000". */
@@ -200,30 +235,69 @@ export function createApiClient({ baseUrl }: ApiClientOptions) {
         `/groups/${inviteCode}/expenses`
       ),
 
+    getHistory: (inviteCode: string) =>
+      request<{ entries: HistoryEntry[] }>(
+        baseUrl,
+        `/groups/${inviteCode}/history`
+      ),
+
     createExpense: (inviteCode: string, expense: NewExpense) =>
       request<{ expense: Expense; hostMessage: Message }>(
         baseUrl,
         `/groups/${inviteCode}/expenses`,
-        { method: "POST", body: JSON.stringify(expense) }
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...expense,
+            date: expense.date ?? currentLocalDate(),
+          }),
+        }
       ),
 
     createPayment: (
       inviteCode: string,
       fromMemberId: string,
       toMemberId: string | null,
-      amount: number
+      amount: number,
+      date = currentLocalDate()
     ) =>
       request<{ hostMessage: Message }>(
         baseUrl,
         `/groups/${inviteCode}/payments`,
-        { method: "POST", body: JSON.stringify({ fromMemberId, toMemberId, amount }) }
+        { method: "POST", body: JSON.stringify({ fromMemberId, toMemberId, amount, date }) }
       ),
 
     settleAll: (inviteCode: string) =>
       request<{ ok: boolean; count: number }>(
         baseUrl,
         `/groups/${inviteCode}/settle-all`,
-        { method: "POST" }
+        { method: "POST", body: JSON.stringify({ date: currentLocalDate() }) }
+      ),
+
+    getStatementPeriod: (inviteCode: string, from: string, to: string) =>
+      request<{ period: StatementPeriodView }>(
+        baseUrl,
+        `/groups/${inviteCode}/statement?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+      ),
+
+    settleStatementPeriod: (
+      inviteCode: string,
+      from: string,
+      to: string,
+      expected?: Pick<StatementPeriodView, "expenseCount" | "total">
+    ) =>
+      request<{ ok: boolean; count: number; period: StatementPeriodView; hostMessage: Message }>(
+        baseUrl,
+        `/groups/${inviteCode}/statement/settle`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            from,
+            to,
+            paymentDate: currentLocalDate(),
+            ...expected,
+          }),
+        }
       ),
 
     getBalances: (inviteCode: string) =>

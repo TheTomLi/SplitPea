@@ -67,7 +67,21 @@ export interface Expense {
   paidByAccountId?: string | null;
   createdVia: CreatedVia;
   createdAt: string;
+  archivedAt?: string | null;
   splits?: Split[];
+}
+
+/** A repayment between people, or to the shared card when toMemberId is null. */
+export interface Payment {
+  id: string;
+  groupId: string;
+  fromMemberId: string;
+  toMemberId?: string | null;
+  amount: number;
+  date?: string | null;
+  statementFrom?: string | null;
+  statementTo?: string | null;
+  createdAt: string;
 }
 
 export interface Message {

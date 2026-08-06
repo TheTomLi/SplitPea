@@ -55,6 +55,7 @@ model Expense {
   date        DateTime @default(now())
   createdVia  String   @default("manual")
   createdAt   DateTime @default(now())
+  archivedAt  DateTime?
 
   paidByMemberId  String?
   paidByAccountId String?
@@ -81,6 +82,9 @@ model Payment {
   fromMemberId String
   toMemberId   String?
   amount       Float
+  date         DateTime?
+  statementFrom DateTime?
+  statementTo   DateTime?
   createdAt    DateTime @default(now())
   group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
 }

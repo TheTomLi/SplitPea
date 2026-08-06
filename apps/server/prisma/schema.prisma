@@ -60,6 +60,9 @@ model Expense {
   date        DateTime @default(now())
   createdVia  String   @default("manual") // 'manual' | 'rules' | 'llm'
   createdAt   DateTime @default(now())
+  // Shared-card statement expenses are archived after that period is paid.
+  // They remain in the database so balances and the audit trail stay intact.
+  archivedAt  DateTime?
 
   // Who fronted the money — a member OR an account (exactly one is set).
   paidByMemberId  String?
@@ -89,6 +92,10 @@ model Payment {
   fromMemberId String
   toMemberId   String? // null = the shared card
   amount       Float
+  date         DateTime?
+  // Set only for payments created by a shared-card statement settlement.
+  statementFrom DateTime?
+  statementTo   DateTime?
   createdAt    DateTime @default(now())
   group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
 }

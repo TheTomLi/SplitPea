@@ -19,28 +19,35 @@ import {
   type Member,
   type Message,
 } from "@splitpea/core";
-import type { ExpenseProposal, SettlementProposal } from "@splitpea/api-client";
+import type {
+  ExpenseProposal,
+  SettlementProposal,
+  StatementPeriodView,
+} from "@splitpea/api-client";
 import { api } from "./src/api";
 import { KOFI_URL } from "./src/config";
+import { inviteCodeFromInput } from "./src/invite";
 import { loadGroups, removeGroup, saveGroup, type JoinedGroup } from "./src/storage";
 import {
   BalancesPanel,
   ExpenseCard,
   ExpenseForm,
   type ExpenseFormInitial,
+  HistoryPanel,
   MembersPanel,
   ProposalCard,
   SettleAllProposalCard,
   SettlementProposalCard,
+  StatementPeriodCard,
 } from "./src/panels";
 import { Chip } from "./src/ui";
 
-/** On web, read an invite code from the URL (?g=CODE) for shareable links. */
+/** On web, read an invite code from the current shareable URL. */
 function getInviteFromUrl(): string {
   try {
     const loc = (globalThis as unknown as { location?: Location }).location;
     if (!loc) return "";
-    return new URLSearchParams(loc.search).get("g") ?? "";
+    return inviteCodeFromInput(loc.href);
   } catch {
     return "";
   }
@@ -96,7 +103,7 @@ export default function App() {
 }
 
 // ---------------------------------------------------------------------------
-// Home: create a group, join by code, or reopen a previously joined group.
+// Home: create a group, join by link, or reopen a previously joined group.
 // ---------------------------------------------------------------------------
 
 function HomeScreen({
@@ -120,7 +127,8 @@ function HomeScreen({
   const [participantsText, setParticipantsText] = useState("");
 
   // Join form
-  const [joinCode, setJoinCode] = useState("");
+  const [joinInput, setJoinInput] = useState("");
+  const [joinError, setJoinError] = useState<string | null>(null);
 
   useEffect(() => {
     setGroups(loadGroups());
@@ -192,6 +200,19 @@ function HomeScreen({
     } catch {
       setSupportError("Couldn't open Ko-fi. Please try again.");
     }
+  }
+
+  function handleFindGroup() {
+    const code = inviteCodeFromInput(joinInput);
+    if (!code) {
+      setJoinError(
+        "That doesn't look like a SplitPea invite link. Copy the full link and try again."
+      );
+      return;
+    }
+
+    setJoinError(null);
+    onFind(code);
   }
 
   return (
@@ -288,17 +309,28 @@ function HomeScreen({
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Join a group</Text>
+        <Text style={styles.groupMeta}>Paste the invite link you received.</Text>
         <TextInput
           style={styles.input}
-          placeholder="Invite code"
-          autoCapitalize="characters"
-          value={joinCode}
-          onChangeText={setJoinCode}
+          accessibilityLabel="SplitPea invite link"
+          placeholder="https://getsplitpea.com/?g=..."
+          placeholderTextColor="rgba(107, 114, 128, 0.80)"
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          value={joinInput}
+          onChangeText={(value) => {
+            setJoinInput(value);
+            if (joinError) setJoinError(null);
+          }}
+          onSubmitEditing={handleFindGroup}
+          returnKeyType="go"
         />
+        {joinError ? <Text style={styles.fieldError}>{joinError}</Text> : null}
         <Button
           label="Find group"
-          disabled={!joinCode.trim()}
-          onPress={() => onFind(joinCode.trim().toUpperCase())}
+          disabled={!joinInput.trim()}
+          onPress={handleFindGroup}
         />
       </View>
 
@@ -328,7 +360,7 @@ function HomeScreen({
 }
 
 // ---------------------------------------------------------------------------
-// Join: look up a group by code, then pick who you are (or add a new name).
+// Join: look up a group from its invite, then pick who you are (or add a name).
 // ---------------------------------------------------------------------------
 
 function JoinScreen({
@@ -444,7 +476,9 @@ function ChatScreen({
   const [metaLoaded, setMetaLoaded] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [overlay, setOverlay] = useState<null | "expense" | "balances" | "members">(null);
+  const [overlay, setOverlay] = useState<
+    null | "expense" | "balances" | "history" | "members"
+  >(null);
   const [copied, setCopied] = useState(false);
   const isJoint = group.groupType === "joint";
 
@@ -464,6 +498,7 @@ function ChatScreen({
   const [proposal, setProposal] = useState<ExpenseProposal | null>(null);
   const [settlement, setSettlement] = useState<SettlementProposal | null>(null);
   const [settleAll, setSettleAll] = useState<{ count: number } | null>(null);
+  const [statementPeriod, setStatementPeriod] = useState<StatementPeriodView | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [editInitial, setEditInitial] = useState<ExpenseFormInitial | undefined>(undefined);
   const [text, setText] = useState("");
@@ -516,12 +551,21 @@ function ChatScreen({
   const examplePeople = otherLabel
     ? `${senderLabel} and ${otherLabel}`
     : senderLabel;
-  const structuredExample = isJoint
-    ? `$40 on dinner, for ${examplePeople}, split evenly`
-    : `$40 on dinner, paid by ${examplePayer}, for ${examplePeople}, split evenly`;
+  const structuredExamples = isJoint
+    ? otherLabel
+      ? [
+          `${otherLabel} and I spent $30 on dinner, split 50/50`,
+          `${otherLabel} and I spent $30 on dinner: $20 on me and $10 on ${otherLabel}`,
+        ]
+      : ["I spent $30 on dinner"]
+    : [
+        `$40 on dinner, paid by ${examplePayer}, for ${examplePeople}, split evenly`,
+      ];
   const cardLabel = accounts[0]?.name ?? "The shared card";
   const composerPlaceholder = isJoint
-    ? "Try: $40 on dinner, for everyone…"
+    ? otherLabel
+      ? `Try: ${otherLabel} and I spent $30…`
+      : "Try: I spent $30 on dinner…"
     : `Try: $40 on dinner, paid by ${examplePayer}…`;
 
   async function handleSend() {
@@ -535,6 +579,7 @@ function ChatScreen({
       if (result.proposal) setProposal(result.proposal);
       if (result.settlementProposal) setSettlement(result.settlementProposal);
       if (result.settleAllProposal) setSettleAll(result.settleAllProposal);
+      if (result.statementPeriod) setStatementPeriod(result.statementPeriod);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -600,6 +645,26 @@ function ChatScreen({
     }
   }
 
+  async function confirmStatementPeriod() {
+    if (!statementPeriod) return;
+    setConfirming(true);
+    setError(null);
+    try {
+      await api.settleStatementPeriod(
+        group.inviteCode,
+        statementPeriod.from,
+        statementPeriod.to,
+        statementPeriod
+      );
+      setStatementPeriod(null);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
   function editProposal() {
     if (!proposal) return;
     setEditInitial({
@@ -638,6 +703,9 @@ function ChatScreen({
         <Pressable style={styles.actionBtn} onPress={() => setOverlay("balances")}>
           <Text style={styles.actionText}>Balances</Text>
         </Pressable>
+        <Pressable style={styles.actionBtn} onPress={() => setOverlay("history")}>
+          <Text style={styles.actionText}>History</Text>
+        </Pressable>
         <Pressable style={styles.actionBtn} onPress={() => setOverlay("members")}>
           <Text style={styles.actionText}>People</Text>
         </Pressable>
@@ -667,31 +735,34 @@ function ChatScreen({
               <Text style={styles.exampleEyebrow}>TRY AN EXPENSE</Text>
               {isJoint ? (
                 <Text style={styles.examplePayerNote}>
-                  {cardLabel} is always the payer.
+                  {cardLabel} pays automatically. Say who spent and how to split it.
                 </Text>
               ) : null}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Use example expense: ${structuredExample}`}
-                accessibilityHint={
-                  "Fills the message input so you can edit it. " +
-                  "It will not send automatically."
-                }
-                onPress={() => {
-                  setText(structuredExample);
-                  composerRef.current?.focus();
-                }}
-                style={({ pressed }) => [
-                  styles.exampleCard,
-                  pressed && styles.exampleCardPressed,
-                ]}
-              >
-                <Text style={styles.exampleFormula}>{structuredExample}</Text>
-                <Text style={styles.exampleHint}>Use this example</Text>
-              </Pressable>
+              {structuredExamples.map((example) => (
+                <Pressable
+                  key={example}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Use example expense: ${example}`}
+                  accessibilityHint={
+                    "Fills the message input so you can edit it. " +
+                    "It will not send automatically."
+                  }
+                  onPress={() => {
+                    setText(example);
+                    composerRef.current?.focus();
+                  }}
+                  style={({ pressed }) => [
+                    styles.exampleCard,
+                    pressed && styles.exampleCardPressed,
+                  ]}
+                >
+                  <Text style={styles.exampleFormula}>{example}</Text>
+                  <Text style={styles.exampleHint}>Use this example</Text>
+                </Pressable>
+              ))}
               <Text style={styles.exampleTemplate}>
                 {isJoint
-                  ? "amount · what · for whom · split evenly"
+                  ? "who spent · total · what · 50/50 or exact amounts"
                   : "amount · what · paid by whom · for whom · split evenly"}
               </Text>
             </View>
@@ -700,7 +771,7 @@ function ChatScreen({
           )
         }
         ListFooterComponent={
-          proposal || settlement || settleAll ? (
+          proposal || settlement || settleAll || statementPeriod ? (
             <View style={styles.pendingBubble}>
               <Text style={styles.bubbleHostLabel}>{HOST_NAME}</Text>
               {proposal && (
@@ -726,6 +797,14 @@ function ChatScreen({
                   busy={confirming}
                   onConfirm={confirmSettleAll}
                   onCancel={() => setSettleAll(null)}
+                />
+              )}
+              {statementPeriod && (
+                <StatementPeriodCard
+                  period={statementPeriod}
+                  busy={confirming}
+                  onConfirm={confirmStatementPeriod}
+                  onCancel={() => setStatementPeriod(null)}
                 />
               )}
             </View>
@@ -804,6 +883,13 @@ function ChatScreen({
       {overlay === "balances" && (
         <BalancesPanel
           inviteCode={group.inviteCode}
+          onClose={() => setOverlay(null)}
+        />
+      )}
+      {overlay === "history" && (
+        <HistoryPanel
+          inviteCode={group.inviteCode}
+          isJoint={isJoint}
           onClose={() => setOverlay(null)}
         />
       )}
@@ -915,6 +1001,7 @@ const styles = StyleSheet.create({
   leaveText: { fontSize: 14, fontWeight: "600", color: "#6b7280" },
   typeHint: { fontSize: 12, color: "#6b7280", fontStyle: "italic" },
   error: { color: "#dc2626", fontSize: 14, paddingHorizontal: 20 },
+  fieldError: { color: "#dc2626", fontSize: 13 },
   supportFooter: { alignItems: "center", gap: 2 },
   supportLink: {
     minHeight: 44,

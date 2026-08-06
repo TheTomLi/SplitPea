@@ -3,16 +3,39 @@ import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 
 import type { Account, GroupType, Member, SplitMode } from "@splitpea/core";
 import type {
   ExpenseProposal,
+  HistoryEntry,
   MemberBalanceView,
   NewExpense,
   SettlementProposal,
   SettlementView,
   SplitInput,
+  StatementPeriodView,
 } from "@splitpea/api-client";
 import { api } from "./api";
 import { Button, Chip, COLORS, u } from "./ui";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
+
+function localIsoDate(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function firstDayOfMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function displayDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      });
+}
 
 export interface ExpenseFormInitial {
   amount?: string;
@@ -20,6 +43,7 @@ export interface ExpenseFormInitial {
   payerKey?: string;
   /** Full splits (mode + per-person value) — lets Edit preserve custom splits. */
   splits?: SplitInput[];
+  date?: string;
 }
 
 const SPLIT_MODE_LABELS: { mode: SplitMode; label: string }[] = [
@@ -90,6 +114,7 @@ export function ExpenseForm({
 
   const [amount, setAmount] = useState(initial?.amount ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
+  const [date, setDate] = useState(initial?.date ?? localIsoDate());
   const [payerKey, setPayerKey] = useState(initial?.payerKey ?? defaultPayerKey);
   const [splitMode, setSplitMode] = useState<SplitMode>(initialMode);
   const [selected, setSelected] = useState<string[]>(
@@ -123,6 +148,9 @@ export function ExpenseForm({
 
   async function submit() {
     if (!description.trim()) return setError("Enter a description.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return setError("Enter the date as YYYY-MM-DD.");
+    }
 
     let amt: number;
     let splits: SplitInput[];
@@ -152,6 +180,7 @@ export function ExpenseForm({
       amount: amt,
       description: description.trim(),
       splits,
+      date,
     };
     if (payerKey.startsWith("m:")) expense.paidByMemberId = payerKey.slice(2);
     else expense.paidByAccountId = payerKey.slice(2);
@@ -191,6 +220,16 @@ export function ExpenseForm({
         placeholder="dinner"
         value={description}
         onChangeText={setDescription}
+      />
+
+      <Text style={u.label}>Transaction date</Text>
+      <TextInput
+        accessibilityLabel="Transaction date"
+        style={u.input}
+        placeholder="YYYY-MM-DD"
+        value={date}
+        onChangeText={setDate}
+        inputMode="numeric"
       />
 
       {isJoint ? (
@@ -534,6 +573,84 @@ export function MembersPanel({
 
 // ---------------------------------------------------------------------------
 
+export function HistoryPanel({
+  inviteCode,
+  isJoint,
+  onClose,
+}: {
+  inviteCode: string;
+  isJoint: boolean;
+  onClose: () => void;
+}) {
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.getHistory(inviteCode)
+      .then((result) => {
+        if (active) setEntries(result.entries);
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [inviteCode]);
+
+  return (
+    <Sheet title="History" onClose={onClose}>
+      <Text style={u.muted}>Newest transactions appear first.</Text>
+      {isJoint ? (
+        <Text style={u.muted}>
+          Expenses leave this active list after their statement is marked paid. The settlement payments remain as a record.
+        </Text>
+      ) : null}
+      {loading ? <ActivityIndicator /> : null}
+      {error ? <Text style={u.error}>{error}</Text> : null}
+      {!loading && entries.length === 0 ? (
+        <Text style={u.muted}>No transactions yet.</Text>
+      ) : null}
+      {entries.map((entry) => (
+        <View key={`${entry.type}:${entry.id}`} style={u.card}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 12 }}>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={u.cardTitle}>{entry.description}</Text>
+              <Text style={u.muted}>{displayDate(entry.date)}</Text>
+            </View>
+            <Text
+              style={{
+                fontSize: 16,
+                fontWeight: "800",
+                color: entry.type === "payment" ? COLORS.blue : COLORS.green,
+              }}
+            >
+              {entry.type === "payment" ? "Paid " : ""}{money(entry.amount)}
+            </Text>
+          </View>
+          <Text style={u.muted}>
+            {entry.type === "payment" ? "From" : "Paid by"} {entry.payerLabel}
+            {entry.forLabel ? ` · ${entry.type === "payment" ? "to" : "for"} ${entry.forLabel}` : ""}
+          </Text>
+          {entry.splitBreakdown?.map((split) => (
+            <Text key={split.name} style={{ fontSize: 13, color: COLORS.ink }}>
+              {split.name}: <Text style={{ fontWeight: "700" }}>{money(split.amount)}</Text>
+            </Text>
+          ))}
+        </View>
+      ))}
+    </Sheet>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 export function BalancesPanel({
   inviteCode,
   onClose,
@@ -549,6 +666,12 @@ export function BalancesPanel({
   const [error, setError] = useState<string | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [settling, setSettling] = useState(false);
+  const [from, setFrom] = useState(firstDayOfMonth());
+  const [to, setTo] = useState(localIsoDate());
+  const [period, setPeriod] = useState<StatementPeriodView | null>(null);
+  const [periodLoading, setPeriodLoading] = useState(false);
+  const [confirmPeriod, setConfirmPeriod] = useState(false);
+  const [periodNotice, setPeriodNotice] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -580,6 +703,41 @@ export function BalancesPanel({
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSettling(false);
+    }
+  }
+
+  async function calculatePeriod() {
+    setPeriodLoading(true);
+    setError(null);
+    setPeriodNotice(null);
+    setConfirmPeriod(false);
+    try {
+      const result = await api.getStatementPeriod(inviteCode, from.trim(), to.trim());
+      setPeriod(result.period);
+    } catch (e) {
+      setPeriod(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPeriodLoading(false);
+    }
+  }
+
+  async function settlePeriod() {
+    if (!period) return;
+    setPeriodLoading(true);
+    setError(null);
+    try {
+      await api.settleStatementPeriod(inviteCode, period.from, period.to, period);
+      setConfirmPeriod(false);
+      setPeriod(null);
+      setPeriodNotice(
+        `Paid and archived ${period.expenseCount} expense${period.expenseCount === 1 ? "" : "s"} from ${period.from} through ${period.to}.`
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPeriodLoading(false);
     }
   }
 
@@ -626,6 +784,87 @@ export function BalancesPanel({
               </Text>
             </View>
           </View>
+
+          <Text style={u.cardTitle}>Statement period</Text>
+          <Text style={u.muted}>
+            Calculate unpaid shared-card expenses between two dates, inclusive.
+          </Text>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <View style={{ flex: 1, gap: 5 }}>
+              <Text style={u.label}>From</Text>
+              <TextInput
+                accessibilityLabel="Statement start date"
+                style={u.input}
+                placeholder="YYYY-MM-DD"
+                value={from}
+                onChangeText={setFrom}
+                inputMode="numeric"
+              />
+            </View>
+            <View style={{ flex: 1, gap: 5 }}>
+              <Text style={u.label}>Through</Text>
+              <TextInput
+                accessibilityLabel="Statement end date"
+                style={u.input}
+                placeholder="YYYY-MM-DD"
+                value={to}
+                onChangeText={setTo}
+                inputMode="numeric"
+              />
+            </View>
+          </View>
+          <Button
+            label={periodLoading ? "Calculating…" : "Calculate period"}
+            variant="secondary"
+            disabled={periodLoading}
+            onPress={calculatePeriod}
+          />
+          {periodNotice ? <Text style={{ color: COLORS.green }}>{periodNotice}</Text> : null}
+          {period ? (
+            <View style={u.card}>
+              <Text style={u.cardTitle}>
+                {period.from} through {period.to}
+              </Text>
+              {period.members.map((member) => (
+                <View
+                  key={member.memberId}
+                  style={{ flexDirection: "row", justifyContent: "space-between" }}
+                >
+                  <Text style={{ color: COLORS.ink }}>{member.name}</Text>
+                  <Text style={{ color: COLORS.ink, fontWeight: "700" }}>
+                    {money(member.amount)}
+                  </Text>
+                </View>
+              ))}
+              <Text style={u.muted}>
+                {period.expenseCount} expense{period.expenseCount === 1 ? "" : "s"} · {money(period.total)} total
+              </Text>
+              {period.expenseCount > 0 && (confirmPeriod ? (
+                <View style={{ gap: 8 }}>
+                  <Text style={u.muted}>
+                    Record these payments and remove the expenses from active History?
+                  </Text>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Button
+                        label={periodLoading ? "Marking paid…" : "Yes, mark paid"}
+                        disabled={periodLoading}
+                        onPress={settlePeriod}
+                      />
+                    </View>
+                    <Button
+                      label="Cancel"
+                      variant="secondary"
+                      disabled={periodLoading}
+                      onPress={() => setConfirmPeriod(false)}
+                    />
+                  </View>
+                </View>
+              ) : (
+                <Button label="Mark this period paid" onPress={() => setConfirmPeriod(true)} />
+              ))}
+            </View>
+          ) : null}
         </>
       )}
 
@@ -713,6 +952,7 @@ export function ExpenseCard({ payload, text }: { payload: string | null; text: s
     forLabel?: string;
     splitMembers: string[];
     splitBreakdown?: { name: string; amount: number }[];
+    date?: string;
   } | null = null;
   try {
     if (payload) parsed = JSON.parse(payload);
@@ -741,6 +981,7 @@ export function ExpenseCard({ payload, text }: { payload: string | null; text: s
         Paid by {parsed.payerLabel}
         {forLabel ? ` for ${forLabel}` : ""}
       </Text>
+      {parsed.date ? <Text style={u.muted}>{displayDate(parsed.date)}</Text> : null}
       {breakdown && breakdown.length > 0 ? (
         <View style={{ marginTop: 2 }}>
           {breakdown.map((b, i) => (
@@ -847,6 +1088,53 @@ export function SettleAllProposalCard({
           <Button label={busy ? "Settling…" : "Confirm"} onPress={onConfirm} disabled={busy} />
         </View>
         <Button label="Cancel" variant="secondary" onPress={onCancel} disabled={busy} />
+      </View>
+    </View>
+  );
+}
+
+/** Date-range statement result shown after a natural-language chat command. */
+export function StatementPeriodCard({
+  period,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  period: StatementPeriodView;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <View style={pc.wrap}>
+      <Text style={pc.label}>STATEMENT · INCLUSIVE</Text>
+      <Text style={{ fontSize: 15, fontWeight: "700", color: COLORS.ink }}>
+        {period.from} through {period.to}
+      </Text>
+      {period.members.map((member) => (
+        <View
+          key={member.memberId}
+          style={{ flexDirection: "row", justifyContent: "space-between" }}
+        >
+          <Text style={{ color: COLORS.ink }}>{member.name}</Text>
+          <Text style={{ color: COLORS.ink, fontWeight: "700" }}>{money(member.amount)}</Text>
+        </View>
+      ))}
+      <Text style={u.muted}>
+        {period.expenseCount} expense{period.expenseCount === 1 ? "" : "s"} · {money(period.total)} total
+      </Text>
+      <Text style={u.muted}>
+        Marking paid records the payments and removes these expenses from active History.
+      </Text>
+      <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+        <View style={{ flex: 1 }}>
+          <Button
+            label={busy ? "Marking paid…" : "Mark period paid"}
+            onPress={onConfirm}
+            disabled={busy}
+          />
+        </View>
+        <Button label="Dismiss" variant="secondary" onPress={onCancel} disabled={busy} />
       </View>
     </View>
   );

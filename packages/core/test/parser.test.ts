@@ -306,6 +306,7 @@ check(
     "formula: reserved names are quoted for examples",
     formatStructuredMemberName("Me") === '"Me"' &&
       formatStructuredMemberName("Everyone") === '"Everyone"' &&
+      formatStructuredMemberName("We") === '"We"' &&
       formatStructuredMemberName("Emma") === "Emma"
   );
 
@@ -400,6 +401,39 @@ check("cmd: balance", parseMessage("balance", ctx).kind === "command");
 check("cmd: settle", parseMessage("settle up", ctx).kind === "command");
 check("cmd: help", parseMessage("help", ctx).kind === "command");
 
+{
+  const rangeCtx = { ...ctx, now: new Date("2026-08-05T12:00:00Z") };
+  const r = parseMessage(
+    "calculate the balances between sept 1 to october 1",
+    rangeCtx
+  );
+  check(
+    "date range: calculate natural months",
+    r.kind === "dateRange" &&
+      r.range.action === "calculate" &&
+      r.range.from === "2026-09-01" &&
+      r.range.to === "2026-10-01",
+    r
+  );
+}
+{
+  const rangeCtx = { ...ctx, now: new Date("2026-08-05T12:00:00Z") };
+  const r = parseMessage(
+    "we paid out the balance from 2026-09-01 through 2026-10-01",
+    rangeCtx
+  );
+  check(
+    "date range: paid statement",
+    r.kind === "dateRange" && r.range.action === "settle",
+    r
+  );
+}
+{
+  const rangeCtx = { ...ctx, now: new Date("2026-08-05T12:00:00Z") };
+  const r = parseMessage("balances between feb 30 and march 2", rangeCtx);
+  check("date range: invalid date fails closed", r.kind === "invalidDateRange", r);
+}
+
 // Relevance gate.
 check("gate: irrelevant", parseMessage("hey how are you", ctx).kind === "irrelevant");
 check("gate: greeting", parseMessage("good morning team", ctx).kind === "irrelevant");
@@ -441,6 +475,198 @@ check(
 check(
   "formula joint: missing separators and strategy is invalid",
   parseMessage("$40 on dinner for Alice and Bob", jctx).kind === "invalid"
+);
+
+{
+  const r = parseMessage(
+    "we spend 100 bucks at hotpot, split evenly",
+    jctx
+  );
+  check(
+    "joint natural: we means everyone",
+    r.kind === "expense" &&
+      r.expense.amount === 100 &&
+      r.expense.description === "hotpot" &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}`).join(",") ===
+        "alice:even,bob:even,carol:even",
+    r
+  );
+}
+
+{
+  const r = parseMessage("5 bucks on grocery", jctx);
+  check(
+    "joint compact: card pays for sender",
+    r.kind === "expense" &&
+      r.expense.amount === 5 &&
+      r.expense.description === "grocery" &&
+      r.expense.paidByMemberId == null &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.length === 1 &&
+      r.expense.splits[0].memberId === "alice",
+    r
+  );
+}
+
+{
+  const r = parseMessage("$5 on groceries.", jctx);
+  check(
+    "joint compact: currency symbol form",
+    r.kind === "expense" &&
+      r.expense.amount === 5 &&
+      r.expense.description === "groceries" &&
+      r.expense.splits[0]?.memberId === "alice",
+    r
+  );
+}
+
+check(
+  "joint compact: rule does not apply to split-bills mode",
+  parseMessage("5 bucks on grocery", { ...jctx, mode: "split" }).kind ===
+    "unparsed"
+);
+
+const naturalJointCtx: ParseContext = {
+  members: [
+    { id: "tom", name: "Tom" },
+    { id: "emma", name: "Emma" },
+  ],
+  accounts: [{ id: "card", name: "Shared card" }],
+  senderMemberId: "tom",
+  mode: "joint",
+  cardAccountId: "card",
+};
+
+{
+  const r = parseMessage(
+    "10 bucks for tnt for both tom and emma",
+    naturalJointCtx
+  );
+  check(
+    "joint item-for-people: both named beneficiaries",
+    r.kind === "expense" &&
+      r.expense.amount === 10 &&
+      r.expense.description === "tnt" &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}`).join(",") ===
+        "tom:even,emma:even",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "10 bucks on tnt for both Tom and Emma",
+    naturalJointCtx
+  );
+  check(
+    "joint item-for-people: on-item variation",
+    r.kind === "expense" &&
+      r.expense.description === "tnt" &&
+      r.expense.splits.length === 2,
+    r
+  );
+}
+
+check(
+  "joint item-for-people: unknown person fails closed",
+  parseMessage(
+    "10 bucks for tnt for both Tom and Lydia",
+    naturalJointCtx
+  ).kind === "invalid"
+);
+
+{
+  const r = parseMessage(
+    "Emma and I spend 30 bucks in total, split 50 50",
+    naturalJointCtx
+  );
+  check(
+    "joint natural: 50/50 sentence",
+    r.kind === "expense" &&
+      r.expense.amount === 30 &&
+      r.expense.description === "expense" &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}`).join(",") ===
+        "tom:even,emma:even",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "Emma and I spent 30 bucks, 20 bucks on me and 10 bucks on Emma",
+    naturalJointCtx
+  );
+  check(
+    "joint natural: exact-dollar sentence",
+    r.kind === "expense" &&
+      r.expense.amount === 30 &&
+      r.expense.description === "expense" &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}:${s.value}`).join(",") ===
+        "tom:exact:20,emma:exact:10",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "Emma and I spent $30 on dinner: $20 on me and $10 on Emma",
+    naturalJointCtx
+  );
+  check(
+    "joint natural: exact dollars retain description",
+    r.kind === "expense" && r.expense.description === "dinner",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "Emma and I spend 100 bucks at hotpot, split by 70 to me and 30 to her",
+    naturalJointCtx
+  );
+  check(
+    "joint natural: subject-relative pronoun split",
+    r.kind === "expense" &&
+      r.expense.amount === 100 &&
+      r.expense.description === "hotpot" &&
+      r.expense.paidByAccountId === "card" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}:${s.value}`).join(",") ===
+        "tom:exact:70,emma:exact:30",
+    r
+  );
+}
+
+check(
+  "joint natural: other-person pronoun stays ambiguous with three people",
+  parseMessage(
+    "Emma, Carol and I spend 100 bucks at hotpot, split by 40 to me and 60 to her",
+    {
+      ...naturalJointCtx,
+      members: [
+        ...naturalJointCtx.members,
+        { id: "carol", name: "Carol" },
+      ],
+    }
+  ).kind === "invalid"
+);
+
+check(
+  "joint natural: unknown beneficiary fails closed",
+  parseMessage(
+    "Lydia and I spent 30 bucks in total, split 50 50",
+    naturalJointCtx
+  ).kind === "invalid"
+);
+check(
+  "joint natural: unsupported numeric split does not become even",
+  parseMessage(
+    "Emma and I spent 30 bucks in total, split 70 30",
+    naturalJointCtx
+  ).kind === "invalid"
 );
 
 // "I spent X" → charged to card, only the sender owes.

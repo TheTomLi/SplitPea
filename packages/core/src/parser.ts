@@ -27,6 +27,8 @@ export interface ParseContext {
   mode?: GroupType;
   /** In joint mode, the id of the group's card that every spend is charged to. */
   cardAccountId?: string | null;
+  /** Override used by tests when a date range omits its year. */
+  now?: Date;
 }
 
 export interface ParsedSplit {
@@ -52,6 +54,13 @@ export interface ParsedExpense {
 
 export type ParseCommand = "balance" | "help" | "settleAll";
 
+export interface ParsedDateRangeCommand {
+  action: "calculate" | "settle";
+  /** Inclusive calendar dates in YYYY-MM-DD form. */
+  from: string;
+  to: string;
+}
+
 /** A settlement/repayment. toMemberId null = paid to the card (joint mode). */
 export interface ParsedSettlement {
   fromMemberId: string;
@@ -63,6 +72,8 @@ export type ParseResult =
   | { kind: "expense"; expense: ParsedExpense }
   | { kind: "settlement"; settlement: ParsedSettlement }
   | { kind: "command"; command: ParseCommand }
+  | { kind: "dateRange"; range: ParsedDateRangeCommand }
+  | { kind: "invalidDateRange" }
   | { kind: "invalid" }
   | { kind: "unparsed" }
   | { kind: "irrelevant" };
@@ -76,7 +87,103 @@ const STRUCTURED_RESERVED_NAMES = new Set([
   "everybody",
   "all",
   "both of us",
+  "we",
+  "us",
+  "all of us",
 ]);
+
+const MONTHS: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
+function isoCalendarDate(year: number, month: number, day: number): string | null {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseCalendarDateToken(token: string, defaultYear: number): string | null {
+  const clean = token.trim().replace(/,$/, "");
+  const iso = clean.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) return isoCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  const monthFirst = clean.match(/^([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?$/i);
+  if (monthFirst) {
+    const month = MONTHS[monthFirst[1].toLowerCase()];
+    return month
+      ? isoCalendarDate(Number(monthFirst[3] ?? defaultYear), month, Number(monthFirst[2]))
+      : null;
+  }
+
+  const dayFirst = clean.match(/^(\d{1,2})\s+([a-z]+)(?:,?\s+(\d{4}))?$/i);
+  if (dayFirst) {
+    const month = MONTHS[dayFirst[2].toLowerCase()];
+    return month
+      ? isoCalendarDate(Number(dayFirst[3] ?? defaultYear), month, Number(dayFirst[1]))
+      : null;
+  }
+  return null;
+}
+
+function parseDateRangeCommand(raw: string, ctx: ParseContext): ParseResult | null {
+  if (!/\b(balance|balances|statement|period)\b/i.test(raw)) return null;
+  if (!/\b(between|from)\b/i.test(raw)) return null;
+
+  const token =
+    "(\\d{4}-\\d{1,2}-\\d{1,2}|[A-Za-z]+\\s+\\d{1,2}(?:,?\\s+\\d{4})?|\\d{1,2}\\s+[A-Za-z]+(?:,?\\s+\\d{4})?)";
+  const match = raw.match(
+    new RegExp(`\\b(?:between|from)\\s+${token}\\s+(?:and|to|through|until)\\s+${token}\\b`, "i")
+  );
+  if (!match) return { kind: "invalidDateRange" };
+
+  const now = ctx.now ?? new Date();
+  const defaultYear = now.getUTCFullYear();
+  let from = parseCalendarDateToken(match[1], defaultYear);
+  let to = parseCalendarDateToken(match[2], defaultYear);
+  if (!from || !to) return { kind: "invalidDateRange" };
+
+  // A year-less Dec → Jan range naturally crosses into the next year.
+  const firstHasYear = /\b\d{4}\b/.test(match[1]);
+  const secondHasYear = /\b\d{4}\b/.test(match[2]);
+  if (to < from && !firstHasYear && !secondHasYear) {
+    to = parseCalendarDateToken(match[2], defaultYear + 1);
+  }
+  if (!to || to < from) return { kind: "invalidDateRange" };
+
+  const action = /\b(mark|settle|settled|paid|pay|clear|archive)\b/i.test(raw)
+    ? "settle"
+    : "calculate";
+  return { kind: "dateRange", range: { action, from, to } };
+}
 
 /** Quote a display name only when it would collide with formula keywords. */
 export function formatStructuredMemberName(name: string): string {
@@ -515,6 +622,269 @@ function resolveStructuredMembers(
     : null;
 }
 
+function jointNaturalDescription(value: string): string {
+  const description = value
+    .replace(/\bin\s+total\b/giu, " ")
+    .replace(/\bsplit\s+by\s*$/giu, " ")
+    .replace(/^[\s,.;:—–·-]+|[\s,.;:—–·-]+$/gu, "")
+    .replace(/^(?:on|at|for)\s+/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return description || "expense";
+}
+
+/**
+ * Shared-card groups describe beneficiaries rather than a payer. Support the
+ * natural forms taught by the UI:
+ *   "Emma and I spent $30 on dinner, split 50/50"
+ *   "Emma and I spent $30 on dinner: $20 on me and $10 on Emma"
+ *
+ * Once this shape is recognised it fails closed: an unknown person or malformed
+ * allocation must not fall through to the legacy parser and become an even split.
+ */
+function parseJointNaturalExpense(
+  raw: string,
+  ctx: ParseContext
+): ParseResult | null {
+  if ((ctx.mode ?? "split") !== "joint") return null;
+
+  const lead = raw.match(
+    /^\s*(.+?)\s+(?:spent|spend)\s+\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?(.*)$/iu
+  );
+  if (!lead) return null;
+
+  const amount = parseFloat(lead[2].replace(",", "."));
+  const subjectPhrase = lead[1].trim();
+  const isGroupWideSubject = /^(?:we(?:\s+all)?|all\s+of\s+us)$/iu.test(
+    subjectPhrase
+  );
+  const beneficiaries = isGroupWideSubject
+    ? ctx.members.length > 0
+      ? { memberIds: ctx.members.map((member) => member.id), corrections: [] }
+      : null
+    : resolveStructuredMembers(subjectPhrase, ctx);
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !beneficiaries ||
+    !ctx.cardAccountId
+  ) {
+    return { kind: "invalid" };
+  }
+
+  const tail = lead[3] ?? "";
+  const exactPattern =
+    /\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?\s+(?:on|for|to)\s+(.+?)(?=\s*(?:(?:[,;]|\band\b)\s*\$?\s*\d)|[.!?]*\s*$)/giu;
+  const exactSplits: ParsedSplit[] = [];
+  const exactCorrections: ParsedNameCorrection[] = [];
+  const seenExactMembers = new Set<string>();
+  const otherSubjectIds = beneficiaries.memberIds.filter(
+    (memberId) => memberId !== ctx.senderMemberId
+  );
+  let firstExactIndex: number | null = null;
+  let exactMatch: RegExpExecArray | null;
+
+  while ((exactMatch = exactPattern.exec(tail))) {
+    firstExactIndex ??= exactMatch.index;
+    const allocationTarget = exactMatch[2].trim();
+    // In "Emma and I ... 70 to me and 30 to her", the pronoun safely means
+    // Emma only when the subject contains the sender and exactly one other
+    // person. Never infer gender or guess among multiple people.
+    const isOtherPronoun = /^(?:her|him|them)$/iu.test(allocationTarget);
+    const named = isOtherPronoun
+      ? beneficiaries.memberIds.includes(ctx.senderMemberId) &&
+        otherSubjectIds.length === 1
+        ? { memberIds: otherSubjectIds, corrections: [] }
+        : null
+      : resolveStructuredMembers(allocationTarget, ctx);
+    if (!named || named.memberIds.length !== 1) return { kind: "invalid" };
+
+    const memberId = named.memberIds[0];
+    if (seenExactMembers.has(memberId)) return { kind: "invalid" };
+    seenExactMembers.add(memberId);
+    exactCorrections.push(...named.corrections);
+    exactSplits.push({
+      memberId,
+      mode: "exact",
+      value: parseFloat(exactMatch[1].replace(",", ".")),
+    });
+  }
+
+  if (exactSplits.length >= 2) {
+    const subjectIds = new Set(beneficiaries.memberIds);
+    const allocationsMatchSubject =
+      exactSplits.length === subjectIds.size &&
+      exactSplits.every((split) => subjectIds.has(split.memberId));
+    if (!allocationsMatchSubject) return { kind: "invalid" };
+
+    const corrections = [...beneficiaries.corrections, ...exactCorrections];
+    return {
+      kind: "expense",
+      expense: {
+        amount,
+        description: jointNaturalDescription(
+          tail.slice(0, firstExactIndex ?? undefined)
+        ),
+        category: null,
+        paidByMemberId: null,
+        paidByAccountId: ctx.cardAccountId,
+        splits: exactSplits,
+        ...(corrections.length > 0 ? { corrections } : {}),
+      },
+    };
+  }
+
+  // A single or malformed explicit allocation is not safe to reinterpret.
+  const attemptedExactAllocation =
+    /\$?\s*\d+(?:[.,]\d{1,2})?\s*(?:bucks?|dollars?)?\s+(?:on|for|to)\s+\S+/iu.test(
+      tail
+    );
+  if (exactSplits.length > 0 || attemptedExactAllocation) {
+    return { kind: "invalid" };
+  }
+
+  const evenMatch = tail.match(
+    /(?:^|[\s,.;:—–·-])(?:split\s+(?:50\s*(?:\/|-|\s)\s*50|evenly|even|equally)|(?:evenly|equally)\s+split)\s*[.!?]*$/iu
+  );
+  if (evenMatch) {
+    const saysFiftyFifty = /50\s*(?:\/|-|\s)\s*50/iu.test(evenMatch[0]);
+    if (saysFiftyFifty && beneficiaries.memberIds.length !== 2) {
+      return { kind: "invalid" };
+    }
+
+    return {
+      kind: "expense",
+      expense: {
+        amount,
+        description: jointNaturalDescription(tail.slice(0, evenMatch.index)),
+        category: null,
+        paidByMemberId: null,
+        paidByAccountId: ctx.cardAccountId,
+        splits: beneficiaries.memberIds.map((memberId) => ({
+          memberId,
+          mode: "even",
+          value: 1,
+        })),
+        ...(beneficiaries.corrections.length > 0
+          ? { corrections: beneficiaries.corrections }
+          : {}),
+      },
+    };
+  }
+
+  // Preserve older simple forms such as "I spent $20 on coffee", but do not
+  // let an unrecognised split instruction silently become an even split.
+  return /\bsplit\b/iu.test(tail) ? { kind: "invalid" } : null;
+}
+
+/**
+ * Shared-card item followed by explicit beneficiaries:
+ *   "10 bucks for TNT for both Tom and Emma"
+ * The second "for" starts the people clause; with no strategy stated, named
+ * beneficiaries split the card charge evenly.
+ */
+function parseJointItemForPeopleExpense(
+  raw: string,
+  ctx: ParseContext
+): ParseResult | null {
+  if ((ctx.mode ?? "split") !== "joint") return null;
+
+  const match = raw.match(
+    /^\s*\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?\s+(?:on|for|at)\s+(.+?)\s*[,;:]?\s+for\s+(.+?)\s*[.!?]*$/iu
+  );
+  if (!match) return null;
+
+  const amount = parseFloat(match[1].replace(",", "."));
+  const description = match[2].trim().replace(/[.,;:]+$/u, "").trim();
+  const rawPeople = match[3].trim();
+  const saysBoth = /^both\b/iu.test(rawPeople);
+  const peoplePhrase = /^both\s+of\s+us$/iu.test(rawPeople)
+    ? rawPeople
+    : rawPeople.replace(/^both\s+/iu, "");
+  const beneficiaries = resolveStructuredMembers(peoplePhrase, ctx);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !description ||
+    !beneficiaries ||
+    !ctx.cardAccountId ||
+    !saysBoth ||
+    (saysBoth && beneficiaries.memberIds.length !== 2)
+  ) {
+    return { kind: "invalid" };
+  }
+
+  return {
+    kind: "expense",
+    expense: {
+      amount,
+      description,
+      category: null,
+      paidByMemberId: null,
+      paidByAccountId: ctx.cardAccountId,
+      splits: beneficiaries.memberIds.map((memberId) => ({
+        memberId,
+        mode: "even",
+        value: 1,
+      })),
+      ...(beneficiaries.corrections.length > 0
+        ? { corrections: beneficiaries.corrections }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Compact shared-card entry: "5 bucks on groceries". With no people or split
+ * clause, the shared card is the known payer and the sender is the beneficiary.
+ */
+function parseJointCompactExpense(
+  raw: string,
+  ctx: ParseContext
+): ParseResult | null {
+  if ((ctx.mode ?? "split") !== "joint") return null;
+
+  const match = raw.match(
+    /^\s*\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?\s+(?:on|for|at)\s+(.+?)\s*[.!?]*$/iu
+  );
+  if (!match) return null;
+
+  // Anything that also specifies people or a strategy belongs to a richer
+  // parser. Do not hide those instructions inside the description.
+  const description = match[2]
+    .trim()
+    .replace(/[.!?]+$/u, "")
+    .trim();
+  if (/\b(?:split|paid\s+by)\b/iu.test(description)) return null;
+
+  const amount = parseFloat(match[1].replace(",", "."));
+  const senderIsMember = ctx.members.some(
+    (member) => member.id === ctx.senderMemberId
+  );
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !description ||
+    !ctx.cardAccountId ||
+    !senderIsMember
+  ) {
+    return { kind: "invalid" };
+  }
+
+  return {
+    kind: "expense",
+    expense: {
+      amount,
+      description,
+      category: null,
+      paidByMemberId: null,
+      paidByAccountId: ctx.cardAccountId,
+      splits: [{ memberId: ctx.senderMemberId, mode: "even", value: 1 }],
+    },
+  };
+}
+
 function resolveStructuredPayer(
   phrase: string,
   ctx: ParseContext
@@ -711,6 +1081,12 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
     return { kind: "command", command: "help" };
   }
 
+  // Date-scoped statement commands must run before the generic balance and
+  // settle-up checks below. Otherwise "balances between Sep 1 and Oct 1" would
+  // accidentally show the all-time balance.
+  const dateRange = parseDateRangeCommand(raw, ctx);
+  if (dateRange) return dateRange;
+
   // "settle everyone up" / "settled for everyone" / "all square" / "reset
   // balances" → zero everyone out (distinct from "settle up" = view balances).
   const looksAllSettled =
@@ -762,9 +1138,20 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   const structured = parseStructuredExpense(raw, ctx);
   if (structured) return structured;
 
+  const jointNatural = parseJointNaturalExpense(raw, ctx);
+  if (jointNatural) return jointNatural;
+
+  // This must run before the structured-shape guard and sender-only compact
+  // parser so the trailing "for people" clause cannot become description text.
+  const jointItemForPeople = parseJointItemForPeopleExpense(raw, ctx);
+  if (jointItemForPeople) return jointItemForPeople;
+
   // A message that clearly attempted the guided formula must not fall through
   // to the looser legacy rules, which could silently change its payer or people.
   if (looksLikeStructuredExpense(raw, ctx)) return { kind: "invalid" };
+
+  const jointCompact = parseJointCompactExpense(raw, ctx);
+  if (jointCompact) return jointCompact;
 
   // A non-even split ("20 to tom, 30 to emma", "me 60% emma 40%", "6 slices…").
   const custom = detectCustomSplits(raw, lower, ctx);

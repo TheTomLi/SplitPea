@@ -93,6 +93,112 @@ async function findGroup(inviteCode: string) {
   return prisma.group.findUnique({ where: { inviteCode } });
 }
 
+interface CalendarBounds {
+  from: string;
+  to: string;
+  start: Date;
+  endExclusive: Date;
+  endInclusive: Date;
+}
+
+function parseCalendarDate(value: unknown): { iso: string; date: Date } | null {
+  const text = String(value ?? "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return { iso: text, date };
+}
+
+function calendarBounds(fromValue: unknown, toValue: unknown): CalendarBounds | null {
+  const from = parseCalendarDate(fromValue);
+  const to = parseCalendarDate(toValue);
+  if (!from || !to || to.date < from.date) return null;
+  const endExclusive = new Date(to.date);
+  endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+  return {
+    from: from.iso,
+    to: to.iso,
+    start: from.date,
+    endExclusive,
+    endInclusive: to.date,
+  };
+}
+
+async function computeStatementPeriod(groupId: string, bounds: CalendarBounds) {
+  const [members, expenses] = await Promise.all([
+    prisma.member.findMany({ where: { groupId }, orderBy: { name: "asc" } }),
+    prisma.expense.findMany({
+      where: {
+        groupId,
+        archivedAt: null,
+        date: { gte: bounds.start, lt: bounds.endExclusive },
+      },
+      include: { splits: true },
+      orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+    }),
+  ]);
+
+  const centsByMember = new Map(members.map((member) => [member.id, 0]));
+  let totalCents = 0;
+  for (const expense of expenses) {
+    const expenseCents = Math.round(expense.amount * 100);
+    totalCents += expenseCents;
+    const shares = computeSplitCents(
+      expenseCents,
+      expense.splits.map((split) => ({
+        memberId: split.memberId,
+        mode: split.mode as SplitMode,
+        value: split.value,
+      }))
+    );
+    for (const [memberId, cents] of shares) {
+      centsByMember.set(memberId, (centsByMember.get(memberId) ?? 0) + cents);
+    }
+  }
+
+  return {
+    period: {
+      from: bounds.from,
+      to: bounds.to,
+      expenseCount: expenses.length,
+      total: totalCents / 100,
+      members: members.map((member) => ({
+        memberId: member.id,
+        name: member.name,
+        amount: (centsByMember.get(member.id) ?? 0) / 100,
+      })),
+    },
+    expenses,
+  };
+}
+
+function statementSummary(
+  cardName: string,
+  period: Awaited<ReturnType<typeof computeStatementPeriod>>["period"]
+): string {
+  if (period.expenseCount === 0) {
+    return `No unpaid expenses were found from ${period.from} through ${period.to}.`;
+  }
+  const lines = period.members.map(
+    (member) => `${member.name} owes ${money(member.amount)}`
+  );
+  return (
+    `${cardName} statement · ${period.from} through ${period.to} (inclusive)\n` +
+    lines.join("\n") +
+    `\n\n${period.expenseCount} expense${period.expenseCount === 1 ? "" : "s"} · ${money(period.total)} total`
+  );
+}
+
 // --- routes ----------------------------------------------------------------
 
 api.get("/health", (_req, res) => {
@@ -306,9 +412,22 @@ function expenseExample(
     ? `${senderLabel} and ${otherLabel}`
     : senderLabel;
   const payerLabel = otherLabel ?? senderLabel;
-  return isJoint
-    ? `$40 on dinner, for ${forLabel}, split evenly`
-    : `$40 on dinner, paid by ${payerLabel}, for ${forLabel}, split evenly`;
+  if (isJoint) {
+    return otherLabel
+      ? `${otherLabel} and I spent $30 on dinner, split 50/50`
+      : "I spent $30 on dinner";
+  }
+  return `$40 on dinner, paid by ${payerLabel}, for ${forLabel}, split evenly`;
+}
+
+function jointExactExpenseExample(
+  members: { id: string; name: string }[],
+  senderMemberId: string
+): string | null {
+  const other = members.find((m) => m.id !== senderMemberId);
+  if (!other) return null;
+  const otherLabel = formatStructuredMemberName(other.name);
+  return `${otherLabel} and I spent $30 on dinner: $20 on me and $10 on ${otherLabel}`;
 }
 
 function helpText(
@@ -318,15 +437,27 @@ function helpText(
   cardName?: string
 ): string {
   const formula = isJoint
-    ? "[amount] on [what], for [people], split evenly"
+    ? "[people] spent [total] on [what], split 50/50 or by exact amounts"
     : "[amount] on [what], paid by [payer], for [people], split evenly";
   const payerNote = isJoint
     ? `\n${cardName ?? "The shared card"} is always the payer.\n`
     : "";
+  const exactExample = isJoint
+    ? jointExactExpenseExample(members, senderMemberId)
+    : null;
+  const examples = [
+    expenseExample(isJoint, members, senderMemberId),
+    ...(exactExample ? [exactExample] : []),
+  ];
   return (
     `I turn messages into expenses.${payerNote}\nA reliable formula is:\n${formula}\n\n` +
-    `• \"${expenseExample(isJoint, members, senderMemberId)}\"\n` +
+    examples.map((example) => `• \"${example}\"`).join("\n") +
+    "\n" +
     '• "balance" to see who owes what\n' +
+    (isJoint
+      ? '• "calculate balances between Sep 1 and Oct 1" for a statement period\n' +
+        '• "mark the balance from Sep 1 to Oct 1 paid" to settle that period\n'
+      : "") +
     '• "settle up" to see how to settle'
   );
 }
@@ -391,6 +522,41 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
     prisma.message.create({
       data: { groupId: group.id, role: "host", text: t, cardType, cardPayload },
     });
+
+  if (result.kind === "invalidDateRange") {
+    return res.json({
+      userMessage,
+      hostMessage: await hostReply(
+        'I couldn\'t read that date range. Try “calculate balances between 2026-09-01 and 2026-10-01”.'
+      ),
+    });
+  }
+
+  if (result.kind === "dateRange") {
+    if (!isJoint) {
+      return res.json({
+        userMessage,
+        hostMessage: await hostReply(
+          "Date-range statement balances are available in shared-card groups. This split-bills group still keeps dated history."
+        ),
+      });
+    }
+    const bounds = calendarBounds(result.range.from, result.range.to);
+    if (!bounds) {
+      return res.json({
+        userMessage,
+        hostMessage: await hostReply("That date range is invalid. Use a start date on or before the end date."),
+      });
+    }
+    const { period } = await computeStatementPeriod(group.id, bounds);
+    const cardName = accounts[0]?.name ?? "Shared card";
+    const hostMessage = await hostReply(statementSummary(cardName, period));
+    return res.json({
+      userMessage,
+      hostMessage,
+      ...(period.expenseCount > 0 ? { statementPeriod: period } : {}),
+    });
+  }
 
   // Expense → return an ephemeral proposal (not stored, not committed).
   if (result.kind === "expense") {
@@ -524,10 +690,13 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
   // A structured formula matched, but a payer/beneficiary/card did not. Never
   // send this to the LLM: explicit financial names must be resolved exactly.
   if (result.kind === "invalid") {
+    const invalidMessage = isJoint
+      ? "I couldn't match every person or split in that shared-card expense. Use names from the People panel, then try:\n"
+      : "I couldn't match every payer or person in that expense. Use names from the People panel, then try:\n";
     return res.json({
       userMessage,
       hostMessage: await hostReply(
-        "I couldn't match every payer or person in that expense. Use names from the People panel, then try:\n" +
+        invalidMessage +
           `\"${expenseExample(isJoint, members, String(memberId))}\"`
       ),
     });
@@ -604,10 +773,81 @@ api.get("/groups/:inviteCode/expenses", async (req, res) => {
   res.json({ expenses });
 });
 
+// Active transaction history. Shared-card expenses leave this list after their
+// statement is paid, but remain stored and continue to participate in the
+// accounting ledger. Settlement payments stay visible as the audit trail.
+api.get("/groups/:inviteCode/history", async (req, res) => {
+  const group = await findGroup(req.params.inviteCode);
+  if (!group) return res.status(404).json({ error: "group not found" });
+
+  const [members, accounts, expenses, payments] = await Promise.all([
+    prisma.member.findMany({ where: { groupId: group.id } }),
+    prisma.account.findMany({ where: { groupId: group.id } }),
+    prisma.expense.findMany({
+      where: { groupId: group.id, archivedAt: null },
+      include: { splits: true },
+    }),
+    prisma.payment.findMany({ where: { groupId: group.id } }),
+  ]);
+  const memberName = (id: string) => members.find((m) => m.id === id)?.name ?? "?";
+  const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? "Card";
+
+  const expenseEntries = expenses.map((expense) => {
+    const shares = computeSplitCents(
+      Math.round(expense.amount * 100),
+      expense.splits.map((split) => ({
+        memberId: split.memberId,
+        mode: split.mode as SplitMode,
+        value: split.value,
+      }))
+    );
+    const names = expense.splits.map((split) => memberName(split.memberId));
+    return {
+      id: expense.id,
+      type: "expense" as const,
+      date: expense.date.toISOString(),
+      amount: expense.amount,
+      description: expense.description,
+      payerLabel: expense.paidByMemberId
+        ? memberName(expense.paidByMemberId)
+        : accountName(expense.paidByAccountId ?? ""),
+      forLabel: names.join(", "),
+      splitBreakdown: [...shares.entries()].map(([memberId, cents]) => ({
+        name: memberName(memberId),
+        amount: cents / 100,
+      })),
+    };
+  });
+  const paymentEntries = payments.map((payment) => {
+    const fromName = memberName(payment.fromMemberId);
+    const toLabel = payment.toMemberId
+      ? memberName(payment.toMemberId)
+      : accounts[0]?.name ?? "the card";
+    return {
+      id: payment.id,
+      type: "payment" as const,
+      date: (payment.date ?? payment.createdAt).toISOString(),
+      amount: payment.amount,
+      description: payment.statementFrom
+        ? `Statement paid · ${payment.statementFrom.toISOString().slice(0, 10)} to ${payment.statementTo?.toISOString().slice(0, 10) ?? "?"}`
+        : "Settlement payment",
+      payerLabel: fromName,
+      forLabel: toLabel,
+      statementFrom: payment.statementFrom?.toISOString() ?? null,
+      statementTo: payment.statementTo?.toISOString() ?? null,
+    };
+  });
+
+  const entries = [...expenseEntries, ...paymentEntries].sort((a, b) =>
+    b.date.localeCompare(a.date)
+  );
+  res.json({ entries });
+});
+
 // Create an expense (with its beneficiary splits) and post a summary card to
 // the group chat so it shows up in the conversation.
 api.post("/groups/:inviteCode/expenses", async (req, res) => {
-  const { amount, description, category, paidByMemberId, paidByAccountId, splits, createdVia } =
+  const { amount, description, category, paidByMemberId, paidByAccountId, splits, createdVia, date } =
     req.body ?? {};
 
   const amt = Number(amount);
@@ -620,6 +860,10 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
   }
   if (!Array.isArray(splits) || splits.length === 0) {
     return res.status(400).json({ error: "at least one split is required" });
+  }
+  const expenseDate = date == null || date === "" ? null : parseCalendarDate(date);
+  if (date != null && date !== "" && !expenseDate) {
+    return res.status(400).json({ error: "date must be a valid YYYY-MM-DD calendar date" });
   }
 
   const group = await findGroup(req.params.inviteCode);
@@ -634,6 +878,7 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
       paidByMemberId: paidByMemberId ? String(paidByMemberId) : null,
       paidByAccountId: paidByAccountId ? String(paidByAccountId) : null,
       createdVia: createdVia === "rules" || createdVia === "llm" ? createdVia : "manual",
+      date: expenseDate?.date,
       splits: {
         create: (splits as SplitInput[]).map((s) => ({
           memberId: String(s.memberId),
@@ -683,6 +928,7 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
     forLabel,
     splitMembers: splitMemberNames,
     splitBreakdown,
+    date: expense.date.toISOString(),
   });
 
   const hostMessage = await prisma.message.create({
@@ -701,11 +947,15 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
 // --- payments (settlements) ------------------------------------------------
 
 api.post("/groups/:inviteCode/payments", async (req, res) => {
-  const { fromMemberId, toMemberId, amount } = req.body ?? {};
+  const { fromMemberId, toMemberId, amount, date } = req.body ?? {};
   const amt = Number(amount);
   if (!fromMemberId) return res.status(400).json({ error: "fromMemberId is required" });
   if (!Number.isFinite(amt) || amt <= 0) {
     return res.status(400).json({ error: "amount must be a positive number" });
+  }
+  const paymentDate = date == null || date === "" ? null : parseCalendarDate(date);
+  if (date != null && date !== "" && !paymentDate) {
+    return res.status(400).json({ error: "date must be a valid YYYY-MM-DD calendar date" });
   }
 
   const group = await findGroup(req.params.inviteCode);
@@ -717,6 +967,7 @@ api.post("/groups/:inviteCode/payments", async (req, res) => {
       fromMemberId: String(fromMemberId),
       toMemberId: toMemberId ? String(toMemberId) : null,
       amount: amt,
+      date: paymentDate?.date ?? new Date(),
     },
   });
 
@@ -740,6 +991,109 @@ api.post("/groups/:inviteCode/payments", async (req, res) => {
   res.json({ payment, hostMessage });
 });
 
+// Preview the unpaid expenses on a shared-card statement. Dates are inclusive.
+api.get("/groups/:inviteCode/statement", async (req, res) => {
+  const group = await findGroup(req.params.inviteCode);
+  if (!group) return res.status(404).json({ error: "group not found" });
+  if (group.type !== "joint") {
+    return res.status(400).json({ error: "statement periods are only available for shared-card groups" });
+  }
+  const bounds = calendarBounds(req.query.from, req.query.to);
+  if (!bounds) {
+    return res.status(400).json({ error: "use valid YYYY-MM-DD dates with start on or before end" });
+  }
+  const { period } = await computeStatementPeriod(group.id, bounds);
+  res.json({ period });
+});
+
+// Mark a shared-card statement paid. The expense rows are archived (not
+// deleted) and exact offsetting payments are added to the permanent ledger.
+api.post("/groups/:inviteCode/statement/settle", async (req, res) => {
+  const group = await findGroup(req.params.inviteCode);
+  if (!group) return res.status(404).json({ error: "group not found" });
+  if (group.type !== "joint") {
+    return res.status(400).json({ error: "statement periods are only available for shared-card groups" });
+  }
+  const bounds = calendarBounds(req.body?.from, req.body?.to);
+  if (!bounds) {
+    return res.status(400).json({ error: "use valid YYYY-MM-DD dates with start on or before end" });
+  }
+
+  const { period, expenses } = await computeStatementPeriod(group.id, bounds);
+  const expectedCount = Number(req.body?.expenseCount);
+  const expectedTotal = Number(req.body?.total);
+  if (
+    (Number.isFinite(expectedCount) && expectedCount !== period.expenseCount) ||
+    (Number.isFinite(expectedTotal) && Math.round(expectedTotal * 100) !== Math.round(period.total * 100))
+  ) {
+    return res.status(409).json({
+      error: "That statement changed since it was calculated. Review the updated period before marking it paid.",
+    });
+  }
+  const account = await prisma.account.findFirst({ where: { groupId: group.id } });
+  const cardName = account?.name ?? "Shared card";
+  if (expenses.length === 0) {
+    const hostMessage = await prisma.message.create({
+      data: {
+        groupId: group.id,
+        role: "host",
+        text: `No unpaid expenses were found from ${period.from} through ${period.to}.`,
+      },
+    });
+    return res.json({ ok: true, count: 0, period, hostMessage });
+  }
+
+  const now = new Date();
+  const paymentDate =
+    req.body?.paymentDate == null || req.body.paymentDate === ""
+      ? null
+      : parseCalendarDate(req.body.paymentDate);
+  if (req.body?.paymentDate != null && req.body.paymentDate !== "" && !paymentDate) {
+    return res.status(400).json({ error: "paymentDate must be a valid YYYY-MM-DD calendar date" });
+  }
+  const payments = period.members
+    .map((member) => ({ ...member, cents: Math.round(member.amount * 100) }))
+    .filter((member) => member.cents > 0);
+  try {
+    const hostMessage = await prisma.$transaction(async (tx) => {
+      const archived = await tx.expense.updateMany({
+        where: { id: { in: expenses.map((expense) => expense.id) }, archivedAt: null },
+        data: { archivedAt: now },
+      });
+      if (archived.count !== expenses.length) throw new Error("STATEMENT_CHANGED");
+      if (payments.length > 0) {
+        await tx.payment.createMany({
+          data: payments.map((member) => ({
+            groupId: group.id,
+            fromMemberId: member.memberId,
+            toMemberId: null,
+            amount: member.cents / 100,
+            date: paymentDate?.date ?? now,
+            statementFrom: bounds.start,
+            statementTo: bounds.endInclusive,
+          })),
+        });
+      }
+      return tx.message.create({
+        data: {
+          groupId: group.id,
+          role: "host",
+          cardType: "settlement",
+          text: `✅ Paid ${cardName} statement from ${period.from} through ${period.to}: ${money(period.total)} across ${period.expenseCount} expense${period.expenseCount === 1 ? "" : "s"}.`,
+        },
+      });
+    });
+    return res.json({ ok: true, count: payments.length, period, hostMessage });
+  } catch (error) {
+    if (error instanceof Error && error.message === "STATEMENT_CHANGED") {
+      return res.status(409).json({
+        error: "That statement changed while it was being paid. Recalculate the period and try again.",
+      });
+    }
+    throw error;
+  }
+});
+
 // Settle everyone up at once: record the payments that bring all balances to $0.
 api.post("/groups/:inviteCode/settle-all", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
@@ -747,6 +1101,22 @@ api.post("/groups/:inviteCode/settle-all", async (req, res) => {
 
   const isJoint = group.type === "joint";
   const { balances, settlements } = await computeGroupBalances(group.id);
+  const activeJointExpenses = isJoint
+    ? await prisma.expense.findMany({
+        where: { groupId: group.id, archivedAt: null },
+        select: { id: true, date: true },
+        orderBy: { date: "asc" },
+      })
+    : [];
+  const statementFrom = activeJointExpenses[0]?.date;
+  const statementTo = activeJointExpenses.at(-1)?.date;
+  const settledAt = new Date();
+  const requestedPaymentDate =
+    req.body?.date == null || req.body.date === "" ? null : parseCalendarDate(req.body.date);
+  if (req.body?.date != null && req.body.date !== "" && !requestedPaymentDate) {
+    return res.status(400).json({ error: "date must be a valid YYYY-MM-DD calendar date" });
+  }
+  const paymentDate = requestedPaymentDate?.date ?? settledAt;
 
   const toCreate = isJoint
     ? balances
@@ -757,15 +1127,19 @@ api.post("/groups/:inviteCode/settle-all", async (req, res) => {
           fromMemberId: b.memberId,
           toMemberId: null as string | null,
           amount: b.out,
+          date: paymentDate,
+          statementFrom,
+          statementTo,
         }))
     : settlements.map((s) => ({
         groupId: group.id,
         fromMemberId: s.from,
         toMemberId: s.to as string | null,
         amount: s.amount,
+        date: paymentDate,
       }));
 
-  if (toCreate.length === 0) {
+  if (toCreate.length === 0 && activeJointExpenses.length === 0) {
     const hostMessage = await prisma.message.create({
       data: {
         groupId: group.id,
@@ -776,14 +1150,22 @@ api.post("/groups/:inviteCode/settle-all", async (req, res) => {
     return res.json({ ok: true, count: 0, hostMessage });
   }
 
-  await prisma.payment.createMany({ data: toCreate });
-  const hostMessage = await prisma.message.create({
-    data: {
-      groupId: group.id,
-      role: "host",
-      text: "✅ Everyone's settled up — all balances are back to $0.",
-      cardType: "settlement",
-    },
+  const hostMessage = await prisma.$transaction(async (tx) => {
+    if (toCreate.length > 0) await tx.payment.createMany({ data: toCreate });
+    if (activeJointExpenses.length > 0) {
+      await tx.expense.updateMany({
+        where: { id: { in: activeJointExpenses.map((expense) => expense.id) }, archivedAt: null },
+        data: { archivedAt: settledAt },
+      });
+    }
+    return tx.message.create({
+      data: {
+        groupId: group.id,
+        role: "host",
+        text: "✅ Everyone's settled up — all balances are back to $0.",
+        cardType: "settlement",
+      },
+    });
   });
   res.json({ ok: true, count: toCreate.length, hostMessage });
 });
