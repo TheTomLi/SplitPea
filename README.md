@@ -73,6 +73,10 @@ tab and join with the invite code to see the group chat with two people.
   temporarily available for already-open clients.
 - SplitPea intentionally has no login for the initial web launch. An invite link
   grants access to that group, so only share it with people you trust.
+- Data retention is activity-based: groups without expenses or payments are
+  deleted after 7 inactive days; groups with transaction history are deleted
+  after 365 inactive days. Successful group mutations refresh `lastActivityAt`,
+  and the server runs cleanup shortly after startup and once per day.
 - For testing on a physical device later, set `apps/app/src/config.ts`
   `API_BASE_URL` to your machine's LAN IP instead of `localhost`.
 ```

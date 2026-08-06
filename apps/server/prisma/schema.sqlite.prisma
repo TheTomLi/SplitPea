@@ -15,6 +15,7 @@ model Group {
   type       String    @default("split")
   inviteCode String    @unique
   createdAt  DateTime  @default(now())
+  lastActivityAt DateTime @default(now())
   members    Member[]
   accounts   Account[]
   expenses   Expense[]

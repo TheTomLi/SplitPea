@@ -25,6 +25,7 @@ export interface Group {
   type: GroupType;
   inviteCode: string;
   createdAt: string;
+  lastActivityAt: string;
 }
 
 /** A person in a group. No account/login — identified by name per group. */

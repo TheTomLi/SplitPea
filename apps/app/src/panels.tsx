@@ -514,6 +514,11 @@ export function MembersPanel({
       </View>
 
       <View style={{ marginTop: 8, gap: 10 }}>
+        <Text style={u.muted}>
+          Data retention: groups without expenses or payments are automatically
+          deleted after 7 inactive days. Groups with transaction history are
+          deleted after 12 inactive months. Any new group activity resets the timer.
+        </Text>
         {confirmLeave ? (
           <View style={{ gap: 8 }}>
             <Text style={u.muted}>

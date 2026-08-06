@@ -14,6 +14,7 @@ import {
   createGroupLimiter,
   messageLimiter,
 } from "./http-security";
+import { cleanupExpiredGroups } from "./retention";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 
@@ -91,6 +92,13 @@ api.use(mutationLimiter);
 /** Look up a group by its invite code, throwing a 404-style null if missing. */
 async function findGroup(inviteCode: string) {
   return prisma.group.findUnique({ where: { inviteCode } });
+}
+
+async function touchGroup(groupId: string) {
+  await prisma.group.update({
+    where: { id: groupId },
+    data: { lastActivityAt: new Date() },
+  });
 }
 
 interface CalendarBounds {
@@ -282,6 +290,7 @@ api.post("/groups/:inviteCode/join", async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const trimmed = String(name).trim();
   let member = await prisma.member.findFirst({
@@ -302,6 +311,7 @@ api.post("/groups/:inviteCode/members", async (req, res) => {
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const trimmed = String(name).trim();
   const existingActive = await prisma.member.findFirst({
@@ -334,6 +344,7 @@ api.patch("/groups/:inviteCode/members/:memberId", async (req, res) => {
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const member = await prisma.member.update({
     where: { id: req.params.memberId },
@@ -349,6 +360,7 @@ api.patch("/groups/:inviteCode/members/:memberId", async (req, res) => {
 api.delete("/groups/:inviteCode/members/:memberId", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
   const memberId = req.params.memberId;
 
   const [splits, paidExpenses, ownedAccounts, payments] = await Promise.all([
@@ -473,6 +485,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const userMessage = await prisma.message.create({
     data: { groupId: group.id, memberId: String(memberId), role: "user", text: String(text) },
@@ -743,6 +756,7 @@ api.post("/groups/:inviteCode/accounts", async (req, res) => {
   if (!name) return res.status(400).json({ error: "name is required" });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const account = await prisma.account.create({
     data: {
@@ -868,6 +882,7 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const expense = await prisma.expense.create({
     data: {
@@ -960,6 +975,7 @@ api.post("/groups/:inviteCode/payments", async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const payment = await prisma.payment.create({
     data: {
@@ -1018,6 +1034,7 @@ api.post("/groups/:inviteCode/statement/settle", async (req, res) => {
   if (!bounds) {
     return res.status(400).json({ error: "use valid YYYY-MM-DD dates with start on or before end" });
   }
+  await touchGroup(group.id);
 
   const { period, expenses } = await computeStatementPeriod(group.id, bounds);
   const expectedCount = Number(req.body?.expenseCount);
@@ -1098,6 +1115,7 @@ api.post("/groups/:inviteCode/statement/settle", async (req, res) => {
 api.post("/groups/:inviteCode/settle-all", async (req, res) => {
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  await touchGroup(group.id);
 
   const isJoint = group.type === "joint";
   const { balances, settlements } = await computeGroupBalances(group.id);
@@ -1195,6 +1213,33 @@ app.use(
   },
   api
 );
+
+const RETENTION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+async function runRetentionCleanup() {
+  try {
+    const result = await cleanupExpiredGroups(prisma);
+    const total = result.emptyDeleted + result.usedDeleted;
+    if (total > 0) {
+      console.log(
+        `Retention cleanup deleted ${result.emptyDeleted} empty group(s) and ${result.usedDeleted} inactive group(s).`
+      );
+    }
+  } catch (error) {
+    console.error("Retention cleanup failed; the server will retry tomorrow.", error);
+  }
+}
+
+// Delay the first pass so startup and the health check are not held up. Multiple
+// Railway replicas can safely run this because the DELETE predicates are
+// evaluated atomically by the database.
+const firstRetentionCleanup = setTimeout(() => void runRetentionCleanup(), 30_000);
+const recurringRetentionCleanup = setInterval(
+  () => void runRetentionCleanup(),
+  RETENTION_CLEANUP_INTERVAL_MS
+);
+firstRetentionCleanup.unref();
+recurringRetentionCleanup.unref();
 
 app.listen(PORT, () => {
   console.log(`SplitPea server listening on http://localhost:${PORT}`);
