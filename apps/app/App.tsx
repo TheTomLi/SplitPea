@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   FlatList,
   Linking,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -40,7 +39,13 @@ import {
   SettlementProposalCard,
   StatementPeriodCard,
 } from "./src/panels";
-import { Chip } from "./src/ui";
+import {
+  Button,
+  Chip,
+  COLORS,
+  MotionPresence,
+  MotionText,
+} from "./src/ui";
 
 /** On web, read an invite code from the current shareable URL. */
 function getInviteFromUrl(): string {
@@ -217,27 +222,58 @@ function HomeScreen({
 
   return (
     <ScrollView contentContainerStyle={styles.homeContainer}>
-      <Text style={styles.title}>SplitPea</Text>
-      <Text style={styles.subtitle}>Split bills by chatting.</Text>
+      <View style={styles.homeHero}>
+        <View style={styles.brandLockup}>
+          <View style={styles.brandMark}>
+            <View style={styles.brandPea} />
+            <View style={styles.brandPea} />
+            <View style={styles.brandPea} />
+          </View>
+          <Text style={styles.wordmark}>SplitPea</Text>
+        </View>
+        <Text style={styles.title}>Shared expenses, sorted.</Text>
+        <Text style={styles.subtitle}>
+          Create a group, describe what you spent, and let SplitPea handle the math.
+        </Text>
+      </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {busy ? <ActivityIndicator style={{ marginVertical: 8 }} /> : null}
 
       {groups.length > 0 && (
         <View style={styles.card}>
+          <Text style={styles.sectionEyebrow}>RECENT</Text>
           <Text style={styles.cardTitle}>Your groups</Text>
           {groups.map((g) => (
             <View key={g.inviteCode} style={styles.groupRowWrap}>
-              <Pressable style={{ flex: 1 }} onPress={() => onOpen(g)}>
-                <Text style={styles.groupName}>{g.groupName}</Text>
-                <Text style={styles.groupMeta}>
-                  as {g.memberName} · {g.inviteCode}
-                </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Open ${g.groupName}`}
+                style={({ pressed }) => [
+                  styles.groupOpen,
+                  pressed && styles.pressablePressed,
+                ]}
+                onPress={() => onOpen(g)}
+              >
+                <View style={styles.groupAvatar}>
+                  <Text style={styles.groupAvatarText}>
+                    {g.groupName.trim().slice(0, 1).toUpperCase()}
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.groupName}>{g.groupName}</Text>
+                  <Text style={styles.groupMeta}>
+                    {g.memberName} · {g.inviteCode}
+                  </Text>
+                </View>
+                <Text style={styles.groupChevron}>›</Text>
               </Pressable>
               {confirmLeaveCode === g.inviteCode ? (
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
                   <Pressable hitSlop={8} onPress={() => handleLeave(g)}>
-                    <Text style={[styles.leaveText, { color: "#dc2626", fontWeight: "700" }]}>
+                    <Text
+                      style={[styles.leaveText, { color: COLORS.red, fontWeight: "700" }]}
+                    >
                       Leave?
                     </Text>
                   </Pressable>
@@ -256,22 +292,32 @@ function HomeScreen({
       )}
 
       <View style={styles.card}>
+        <Text style={styles.sectionEyebrow}>GET STARTED</Text>
         <Text style={styles.cardTitle}>Create a group</Text>
+        <Text style={styles.cardDescription}>
+          Choose how the group pays. You can invite everyone after creating it.
+        </Text>
+        <Text style={styles.fieldLabel}>Group name</Text>
         <TextInput
           style={styles.input}
-          placeholder="Group name (e.g. Tokyo Trip)"
+          accessibilityLabel="Group name"
+          placeholder="e.g. Tokyo Trip"
+          placeholderTextColor={COLORS.grayLight}
           value={groupName}
           onChangeText={setGroupName}
         />
+        <Text style={styles.fieldLabel}>Your name</Text>
         <TextInput
           style={styles.input}
-          placeholder="Your name"
+          accessibilityLabel="Your name"
+          placeholder="How others will see you"
+          placeholderTextColor={COLORS.grayLight}
           value={creatorName}
           onChangeText={setCreatorName}
         />
 
-        <Text style={styles.groupMeta}>Group type</Text>
-        <View style={{ flexDirection: "row", gap: 8 }}>
+        <Text style={styles.fieldLabel}>How are you paying?</Text>
+        <View style={styles.typePicker}>
           <Chip
             label="Split bills"
             selected={groupType === "split"}
@@ -291,30 +337,37 @@ function HomeScreen({
         {groupType === "joint" && (
           <TextInput
             style={styles.input}
-            placeholder="Card name (e.g. Joint Visa)"
+            accessibilityLabel="Shared card name"
+            placeholder="Card name, e.g. Joint Visa"
+            placeholderTextColor={COLORS.grayLight}
             value={cardName}
             onChangeText={setCardName}
           />
         )}
 
+        <Text style={styles.fieldLabel}>Other people</Text>
         <TextInput
           style={styles.input}
-          placeholder="Other participants (comma-separated, optional)"
+          accessibilityLabel="Other people"
+          placeholder="Names separated by commas · optional"
+          placeholderTextColor={COLORS.grayLight}
           value={participantsText}
           onChangeText={setParticipantsText}
         />
 
-        <Button label="Create" onPress={handleCreate} disabled={busy} />
+        <Button label="Create group" onPress={handleCreate} disabled={busy} />
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.sectionEyebrow}>HAVE AN INVITE?</Text>
         <Text style={styles.cardTitle}>Join a group</Text>
-        <Text style={styles.groupMeta}>Paste the invite link you received.</Text>
+        <Text style={styles.cardDescription}>Paste the complete SplitPea link you received.</Text>
+        <Text style={styles.fieldLabel}>Invite link</Text>
         <TextInput
           style={styles.input}
           accessibilityLabel="SplitPea invite link"
           placeholder="https://getsplitpea.com/?g=..."
-          placeholderTextColor="rgba(107, 114, 128, 0.80)"
+          placeholderTextColor={COLORS.grayLight}
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
@@ -417,8 +470,14 @@ function JoinScreen({
 
   return (
     <ScrollView contentContainerStyle={styles.homeContainer}>
-      <Pressable onPress={onBack} style={{ marginTop: 24 }}>
-        <Text style={styles.backText}>‹ Back</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Back to home"
+        onPress={onBack}
+        style={({ pressed }) => [styles.joinBack, pressed && styles.pressablePressed]}
+      >
+        <Text style={styles.joinBackIcon}>‹</Text>
+        <Text style={styles.joinBackText}>Back</Text>
       </Pressable>
 
       {loading ? <ActivityIndicator style={{ marginTop: 20 }} /> : null}
@@ -426,10 +485,14 @@ function JoinScreen({
 
       {group && (
         <View style={styles.card}>
+          <Text style={styles.sectionEyebrow}>YOU’RE INVITED</Text>
           <Text style={styles.cardTitle}>Join “{group.name}”</Text>
+          <Text style={styles.cardDescription}>
+            Choose your existing name, or add yourself as someone new.
+          </Text>
           {members.length > 0 && (
             <>
-              <Text style={styles.groupMeta}>Who are you?</Text>
+              <Text style={styles.fieldLabel}>Who are you?</Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
                 {members.map((m) => (
                   <Chip
@@ -440,12 +503,14 @@ function JoinScreen({
                   />
                 ))}
               </View>
-              <Text style={styles.typeHint}>…or join as a new person:</Text>
+              <Text style={styles.fieldLabel}>Not listed?</Text>
             </>
           )}
           <TextInput
             style={styles.input}
-            placeholder="Your name"
+            accessibilityLabel="Your name"
+            placeholder="Enter your name"
+            placeholderTextColor={COLORS.grayLight}
             value={newName}
             onChangeText={setNewName}
           />
@@ -682,16 +747,29 @@ function ChatScreen({
   return (
     <View style={styles.chatRoot}>
       <View style={styles.chatHeader}>
-        <Pressable onPress={onBack} style={styles.backBtn}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Back to groups"
+          onPress={onBack}
+          style={({ pressed }) => [styles.backBtn, pressed && styles.pressablePressed]}
+        >
           <Text style={styles.backText}>‹</Text>
         </Pressable>
         <View style={{ flex: 1 }}>
           <Text style={styles.chatTitle}>{group.groupName}</Text>
-          <Pressable onPress={copyInvite}>
-            <Text style={styles.chatMeta}>
-              Invite code: {group.inviteCode} ·{" "}
-              <Text style={{ color: BLUE }}>{copied ? "Copied!" : "Copy link"}</Text>
-            </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Copy group invite link"
+            onPress={copyInvite}
+            style={{ alignSelf: "flex-start" }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Text style={styles.chatMeta}>Invite code: {group.inviteCode} · </Text>
+              <MotionText
+                text={copied ? "Copied!" : "Copy link"}
+                style={styles.chatCopyText}
+              />
+            </View>
           </Pressable>
           <Text style={styles.chatTrust}>
             Anyone with this link can access the group. Share it only with people you trust.
@@ -700,17 +778,30 @@ function ChatScreen({
       </View>
 
       <View style={styles.actionBar}>
-        <Pressable style={styles.actionBtn} onPress={() => setOverlay("balances")}>
+        <Pressable
+          style={({ pressed }) => [styles.actionBtn, pressed && styles.actionBtnPressed]}
+          onPress={() => setOverlay("balances")}
+        >
           <Text style={styles.actionText}>Balances</Text>
         </Pressable>
-        <Pressable style={styles.actionBtn} onPress={() => setOverlay("history")}>
+        <Pressable
+          style={({ pressed }) => [styles.actionBtn, pressed && styles.actionBtnPressed]}
+          onPress={() => setOverlay("history")}
+        >
           <Text style={styles.actionText}>History</Text>
         </Pressable>
-        <Pressable style={styles.actionBtn} onPress={() => setOverlay("members")}>
+        <Pressable
+          style={({ pressed }) => [styles.actionBtn, pressed && styles.actionBtnPressed]}
+          onPress={() => setOverlay("members")}
+        >
           <Text style={styles.actionText}>People</Text>
         </Pressable>
         <Pressable
-          style={[styles.actionBtn, styles.actionBtnPrimary]}
+          style={({ pressed }) => [
+            styles.actionBtn,
+            styles.actionBtnPrimary,
+            pressed && styles.actionBtnPrimaryPressed,
+          ]}
           onPress={() => setOverlay("expense")}
         >
           <Text style={styles.actionTextPrimary}>＋ Expense</Text>
@@ -771,8 +862,11 @@ function ChatScreen({
           )
         }
         ListFooterComponent={
-          proposal || settlement || settleAll || statementPeriod ? (
-            <View style={styles.pendingBubble}>
+          <MotionPresence
+            visible={Boolean(proposal || settlement || settleAll || statementPeriod)}
+            style={styles.pendingBubble}
+          >
+            <>
               <Text style={styles.bubbleHostLabel}>{HOST_NAME}</Text>
               {proposal && (
                 <ProposalCard
@@ -807,8 +901,8 @@ function ChatScreen({
                   onCancel={() => setStatementPeriod(null)}
                 />
               )}
-            </View>
-          ) : null
+            </>
+          </MotionPresence>
         }
       />
 
@@ -925,143 +1019,239 @@ function Bubble({ message, myId }: { message: Message; myId: string }) {
   );
 }
 
-function Button({
-  label,
-  onPress,
-  disabled,
-}: {
-  label: string;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={[styles.button, disabled && styles.buttonDisabled]}
-    >
-      <Text style={styles.buttonText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-const BLUE = "#2563eb";
-
 // Display name for the assistant. The message role stays "host" internally.
 const HOST_NAME = "SplitPea Agent";
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#f3f4f6" },
+  root: { flex: 1, backgroundColor: COLORS.bg },
 
   // Home
   homeContainer: {
-    padding: 20,
-    gap: 16,
-    maxWidth: 560,
+    paddingHorizontal: 24,
+    paddingTop: 24,
+    paddingBottom: 56,
+    gap: 20,
+    maxWidth: 680,
     width: "100%",
     alignSelf: "center",
   },
-  title: { fontSize: 34, fontWeight: "800", color: "#111827", marginTop: 24 },
-  subtitle: { fontSize: 16, color: "#6b7280", marginBottom: 8 },
-  card: {
-    backgroundColor: "#fff",
-    borderRadius: 14,
-    padding: 16,
-    gap: 10,
-    shadowColor: "#000",
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
+  homeHero: { gap: 10, paddingTop: 20, paddingBottom: 6 },
+  brandLockup: { flexDirection: "row", alignItems: "center", gap: 10 },
+  brandMark: {
+    width: 40,
+    height: 40,
+    borderRadius: 13,
+    backgroundColor: COLORS.brand,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+    shadowColor: COLORS.brand,
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
   },
-  cardTitle: { fontSize: 17, fontWeight: "700", color: "#111827" },
+  brandPea: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#FFFFFF" },
+  wordmark: {
+    fontSize: 19,
+    lineHeight: 24,
+    letterSpacing: -0.25,
+    fontWeight: "700",
+    color: COLORS.ink,
+  },
+  title: {
+    fontSize: 38,
+    lineHeight: 42,
+    letterSpacing: -1.1,
+    fontWeight: "800",
+    color: COLORS.ink,
+    marginTop: 10,
+  },
+  subtitle: {
+    fontSize: 16,
+    lineHeight: 24,
+    color: COLORS.gray,
+    maxWidth: 560,
+  },
+  card: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 20,
+    gap: 12,
+    shadowColor: "#17211C",
+    shadowOpacity: 0.045,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 5 },
+  },
+  sectionEyebrow: {
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 0.9,
+    fontWeight: "800",
+    color: COLORS.brand,
+  },
+  cardTitle: {
+    fontSize: 21,
+    lineHeight: 26,
+    letterSpacing: -0.4,
+    fontWeight: "700",
+    color: COLORS.ink,
+  },
+  cardDescription: { fontSize: 14, lineHeight: 20, color: COLORS.gray },
+  fieldLabel: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
+    color: COLORS.ink,
+    marginTop: 3,
+  },
   input: {
     borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    backgroundColor: "#fff",
-  },
-  groupRow: {
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
+    borderColor: COLORS.borderStrong,
+    borderRadius: 12,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: 16,
+    color: COLORS.ink,
+    backgroundColor: COLORS.surface,
   },
   groupRowWrap: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
+    gap: 10,
+    paddingVertical: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
+    borderBottomColor: COLORS.border,
   },
-  groupName: { fontSize: 16, fontWeight: "600", color: "#111827" },
-  groupMeta: { fontSize: 13, color: "#6b7280" },
-  leaveText: { fontSize: 14, fontWeight: "600", color: "#6b7280" },
-  typeHint: { fontSize: 12, color: "#6b7280", fontStyle: "italic" },
-  error: { color: "#dc2626", fontSize: 14, paddingHorizontal: 20 },
-  fieldError: { color: "#dc2626", fontSize: 13 },
-  supportFooter: { alignItems: "center", gap: 2 },
+  groupOpen: {
+    flex: 1,
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    paddingVertical: 6,
+  },
+  groupAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.brandSoft,
+  },
+  groupAvatarText: { color: COLORS.brand, fontSize: 15, fontWeight: "800" },
+  groupName: { fontSize: 16, lineHeight: 21, fontWeight: "600", color: COLORS.ink },
+  groupMeta: { fontSize: 13, lineHeight: 18, color: COLORS.gray },
+  groupChevron: { color: COLORS.grayLight, fontSize: 26, lineHeight: 28 },
+  leaveText: { fontSize: 13, fontWeight: "600", color: COLORS.gray },
+  typePicker: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  typeHint: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: COLORS.gray,
+    backgroundColor: COLORS.brandFaint,
+    borderRadius: 10,
+    padding: 10,
+  },
+  error: { color: COLORS.red, fontSize: 14, lineHeight: 20, paddingHorizontal: 20 },
+  fieldError: { color: COLORS.red, fontSize: 13, lineHeight: 18 },
+  supportFooter: { alignItems: "center", gap: 2, marginTop: 2 },
   supportLink: {
     minHeight: 44,
     justifyContent: "center",
     paddingHorizontal: 12,
   },
-  supportLinkPressed: { opacity: 0.55 },
+  supportLinkPressed: { opacity: 0.62, transform: [{ scale: 0.98 }] },
   supportLinkText: {
-    color: "#6b7280",
+    color: COLORS.gray,
     fontSize: 13,
-    textDecorationLine: "underline",
+    fontWeight: "600",
   },
-  supportError: { color: "#dc2626", fontSize: 12, textAlign: "center" },
-
-  // Buttons
-  button: {
-    backgroundColor: BLUE,
-    borderRadius: 10,
-    paddingVertical: 11,
-    paddingHorizontal: 16,
+  supportError: { color: COLORS.red, fontSize: 12, textAlign: "center" },
+  pressablePressed: { opacity: 0.76, transform: [{ scale: 0.98 }] },
+  joinBack: {
+    alignSelf: "flex-start",
+    minHeight: 44,
+    flexDirection: "row",
     alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+    marginTop: 8,
   },
-  buttonDisabled: { opacity: 0.5 },
-  buttonText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  joinBackIcon: { color: COLORS.brand, fontSize: 26, lineHeight: 28 },
+  joinBackText: { color: COLORS.brand, fontSize: 15, fontWeight: "600" },
 
   // Chat
-  chatRoot: { flex: 1, backgroundColor: "#f3f4f6" },
+  chatRoot: { flex: 1, backgroundColor: COLORS.bg },
   chatHeader: {
     flexDirection: "row",
     alignItems: "center",
     paddingTop: 44,
-    paddingBottom: 12,
-    paddingHorizontal: 12,
-    backgroundColor: "#fff",
+    paddingBottom: 14,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(255,255,255,0.96)",
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
-    gap: 8,
+    borderBottomColor: COLORS.border,
+    gap: 10,
   },
-  backBtn: { paddingVertical: 4, paddingHorizontal: 6 },
-  backText: { color: BLUE, fontSize: 26, fontWeight: "600", lineHeight: 28 },
-  chatTitle: { fontSize: 17, fontWeight: "700", color: "#111827" },
-  chatMeta: { fontSize: 12, color: "#6b7280" },
-  chatTrust: { fontSize: 11, color: "#9ca3af", marginTop: 2 },
+  backBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.brandSoft,
+  },
+  backText: { color: COLORS.brand, fontSize: 28, fontWeight: "500", lineHeight: 30 },
+  chatTitle: {
+    fontSize: 18,
+    lineHeight: 23,
+    letterSpacing: -0.25,
+    fontWeight: "700",
+    color: COLORS.ink,
+  },
+  chatMeta: { fontSize: 12, lineHeight: 17, color: COLORS.gray },
+  chatCopyText: {
+    color: COLORS.brand,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
+  },
+  chatTrust: { fontSize: 11, lineHeight: 15, color: COLORS.grayLight, marginTop: 2 },
   actionBar: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: "#fff",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: COLORS.surface,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
+    borderBottomColor: COLORS.border,
   },
   actionBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: "#eef2ff",
+    minHeight: 36,
+    paddingVertical: 8,
+    paddingHorizontal: 13,
+    borderRadius: 11,
+    justifyContent: "center",
+    backgroundColor: COLORS.brandFaint,
+    borderWidth: 1,
+    borderColor: COLORS.brandSoft,
   },
-  actionBtnPrimary: { backgroundColor: BLUE, marginLeft: "auto" },
-  actionText: { color: BLUE, fontWeight: "600", fontSize: 13 },
+  actionBtnPressed: { opacity: 0.72, transform: [{ scale: 0.97 }] },
+  actionBtnPrimary: {
+    backgroundColor: COLORS.brand,
+    borderColor: COLORS.brand,
+    marginLeft: "auto",
+  },
+  actionBtnPrimaryPressed: {
+    backgroundColor: COLORS.brandPressed,
+    transform: [{ scale: 0.97 }],
+  },
+  actionText: { color: COLORS.brand, fontWeight: "600", fontSize: 13 },
   actionTextPrimary: { color: "#fff", fontWeight: "700", fontSize: 13 },
   messageList: { flex: 1 },
   emptyLoader: { marginTop: 36 },
@@ -1071,9 +1261,9 @@ const styles = StyleSheet.create({
     paddingVertical: 28,
     gap: 9,
   },
-  examplePayerNote: { color: "#6b7280", fontSize: 13, textAlign: "center" },
+  examplePayerNote: { color: COLORS.gray, fontSize: 13, lineHeight: 19, textAlign: "center" },
   exampleEyebrow: {
-    color: "#6b7280",
+    color: COLORS.brand,
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 0.8,
@@ -1081,17 +1271,21 @@ const styles = StyleSheet.create({
   exampleCard: {
     width: "100%",
     maxWidth: 520,
-    backgroundColor: "#fff",
+    backgroundColor: COLORS.surface,
     borderWidth: 1,
-    borderColor: "#bfdbfe",
-    borderRadius: 14,
-    padding: 14,
-    gap: 7,
+    borderColor: COLORS.border,
+    borderRadius: 18,
+    padding: 16,
+    gap: 8,
+    shadowColor: "#17211C",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
   },
-  exampleCardPressed: { opacity: 0.7 },
-  exampleFormula: { color: "#111827", fontSize: 15, lineHeight: 22 },
-  exampleHint: { color: BLUE, fontSize: 12, fontWeight: "700" },
-  exampleTemplate: { color: "#6b7280", fontSize: 12, textAlign: "center" },
+  exampleCardPressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
+  exampleFormula: { color: COLORS.ink, fontSize: 15, lineHeight: 22 },
+  exampleHint: { color: COLORS.brand, fontSize: 12, fontWeight: "700" },
+  exampleTemplate: { color: COLORS.gray, fontSize: 12, lineHeight: 17, textAlign: "center" },
   pendingBubble: {
     alignSelf: "flex-start",
     maxWidth: "94%",
@@ -1101,17 +1295,22 @@ const styles = StyleSheet.create({
   },
   bubble: {
     maxWidth: "80%",
-    borderRadius: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    borderRadius: 18,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
   },
-  bubbleMine: { backgroundColor: BLUE, alignSelf: "flex-end" },
-  bubbleOther: { backgroundColor: "#fff", alignSelf: "flex-start" },
+  bubbleMine: { backgroundColor: COLORS.brand, alignSelf: "flex-end" },
+  bubbleOther: {
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignSelf: "flex-start",
+  },
   bubbleHost: {
-    backgroundColor: "#ecfdf5",
+    backgroundColor: COLORS.brandFaint,
     alignSelf: "flex-start",
     borderWidth: 1,
-    borderColor: "#a7f3d0",
+    borderColor: COLORS.brandSoft,
   },
   // Expense cards are host messages too — same green host bubble, just wider so
   // the split breakdown has room.
@@ -1122,27 +1321,33 @@ const styles = StyleSheet.create({
   bubbleHostLabel: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#059669",
+    color: COLORS.green,
     marginBottom: 2,
   },
-  bubbleText: { fontSize: 15, color: "#111827" },
+  bubbleText: { fontSize: 15, lineHeight: 21, color: COLORS.ink },
   bubbleTextMine: { fontSize: 15, color: "#fff" },
   composer: {
     flexDirection: "row",
     gap: 8,
-    padding: 10,
-    backgroundColor: "#fff",
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
+    backgroundColor: "rgba(255,255,255,0.98)",
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#e5e7eb",
+    borderTopColor: COLORS.border,
     alignItems: "center",
   },
   composerInput: {
     flex: 1,
     borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    fontSize: 15,
+    borderColor: COLORS.borderStrong,
+    borderRadius: 16,
+    minHeight: 46,
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    fontSize: 16,
+    lineHeight: 21,
+    color: COLORS.ink,
+    backgroundColor: COLORS.surface,
   },
 });

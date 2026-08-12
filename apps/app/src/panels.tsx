@@ -1,5 +1,14 @@
-import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import type { Account, GroupType, Member, SplitMode } from "@splitpea/core";
 import type {
   ExpenseProposal,
@@ -12,7 +21,17 @@ import type {
   StatementPeriodView,
 } from "@splitpea/api-client";
 import { api } from "./api";
-import { Button, Chip, COLORS, u } from "./ui";
+import {
+  Button,
+  Chip,
+  COLORS,
+  EASE_DRAWER,
+  EASE_OUT,
+  MotionReveal,
+  USE_NATIVE_DRIVER,
+  u,
+  useReduceMotion,
+} from "./ui";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 
@@ -62,19 +81,91 @@ function Sheet({
   onClose: () => void;
   children: React.ReactNode;
 }) {
+  const reduceMotion = useReduceMotion();
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: reduceMotion ? 160 : 280,
+      easing: reduceMotion ? EASE_OUT : EASE_DRAWER,
+      useNativeDriver: USE_NATIVE_DRIVER,
+    }).start();
+  }, [progress, reduceMotion]);
+
+  function closeSheet() {
+    progress.stopAnimation();
+    Animated.timing(progress, {
+      toValue: 0,
+      duration: reduceMotion ? 140 : 220,
+      easing: EASE_OUT,
+      useNativeDriver: USE_NATIVE_DRIVER,
+    }).start(({ finished }) => {
+      if (finished) onClose();
+    });
+  }
+
   return (
     <View style={u.overlay}>
-      <View style={u.sheet}>
+      <Animated.View
+        style={[
+          StyleSheet.absoluteFill,
+          u.overlayScrim,
+          { opacity: progress, pointerEvents: "none" },
+        ]}
+      />
+      <Animated.View
+        style={[
+          u.sheet,
+          {
+            opacity: reduceMotion ? progress : 1,
+            transform: [
+              {
+                translateY: reduceMotion
+                  ? 0
+                  : progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [80, 0],
+                    }),
+              },
+            ],
+          },
+        ]}
+      >
+        <View
+          style={{
+            width: 36,
+            height: 5,
+            borderRadius: 999,
+            backgroundColor: COLORS.borderStrong,
+            alignSelf: "center",
+            marginBottom: -4,
+          }}
+        />
         <View style={u.sheetHeader}>
           <Text style={u.sheetTitle}>{title}</Text>
-          <Pressable onPress={onClose} hitSlop={10}>
-            <Text style={{ fontSize: 22, color: COLORS.gray }}>✕</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Close ${title}`}
+            onPress={closeSheet}
+            hitSlop={10}
+            style={({ pressed }) => ({
+              width: 36,
+              height: 36,
+              borderRadius: 18,
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: pressed ? COLORS.border : COLORS.surfaceMuted,
+              transform: [{ scale: pressed ? 0.96 : 1 }],
+            })}
+          >
+            <Text style={{ fontSize: 18, lineHeight: 20, color: COLORS.gray }}>✕</Text>
           </Pressable>
         </View>
         <ScrollView contentContainerStyle={{ gap: 14, paddingBottom: 24 }}>
           {children}
         </ScrollView>
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -520,7 +611,7 @@ export function MembersPanel({
           deleted after 12 inactive months. Any new group activity resets the timer.
         </Text>
         {confirmLeave ? (
-          <View style={{ gap: 8 }}>
+          <MotionReveal style={{ gap: 8 }} offset={4}>
             <Text style={u.muted}>
               Leave this group on this device? You can rejoin later with the invite code.
             </Text>
@@ -534,7 +625,7 @@ export function MembersPanel({
               </View>
               <Button label="Cancel" variant="secondary" disabled={busy} onPress={() => setConfirmLeave(false)} />
             </View>
-          </View>
+          </MotionReveal>
         ) : (
           <Button
             label="Leave group (this device)"
@@ -544,7 +635,7 @@ export function MembersPanel({
           />
         )}
         {confirmDelete ? (
-          <View style={{ gap: 8 }}>
+          <MotionReveal style={{ gap: 8 }} offset={4}>
             <Text style={u.error}>
               Delete this group and all its data for everyone? This can't be undone.
             </Text>
@@ -563,7 +654,7 @@ export function MembersPanel({
               </View>
               <Button label="Cancel" variant="secondary" onPress={() => setConfirmDelete(false)} />
             </View>
-          </View>
+          </MotionReveal>
         ) : (
           <Pressable onPress={() => setConfirmDelete(true)} hitSlop={6}>
             <Text style={{ color: COLORS.red, fontWeight: "600", textAlign: "center" }}>
@@ -776,7 +867,7 @@ export function BalancesPanel({
                 flexDirection: "row",
                 justifyContent: "space-between",
                 borderTopWidth: 1,
-                borderTopColor: "#e5e7eb",
+                borderTopColor: COLORS.border,
                 paddingTop: 8,
                 marginTop: 4,
               }}
@@ -845,7 +936,7 @@ export function BalancesPanel({
                 {period.expenseCount} expense{period.expenseCount === 1 ? "" : "s"} · {money(period.total)} total
               </Text>
               {period.expenseCount > 0 && (confirmPeriod ? (
-                <View style={{ gap: 8 }}>
+                <MotionReveal style={{ gap: 8 }} offset={4}>
                   <Text style={u.muted}>
                     Record these payments and remove the expenses from active History?
                   </Text>
@@ -864,7 +955,7 @@ export function BalancesPanel({
                       onPress={() => setConfirmPeriod(false)}
                     />
                   </View>
-                </View>
+                </MotionReveal>
               ) : (
                 <Button label="Mark this period paid" onPress={() => setConfirmPeriod(true)} />
               ))}
@@ -919,7 +1010,7 @@ export function BalancesPanel({
       {!loading && hasOutstanding && (
         <View style={{ marginTop: 4, gap: 8 }}>
           {confirmAll ? (
-            <>
+            <MotionReveal style={{ gap: 8 }} offset={4}>
               <Text style={u.muted}>
                 Record all payments and reset everyone to $0?
               </Text>
@@ -933,7 +1024,7 @@ export function BalancesPanel({
                 </View>
                 <Button label="Cancel" variant="secondary" onPress={() => setConfirmAll(false)} />
               </View>
-            </>
+            </MotionReveal>
           ) : (
             <Button
               label="Settle everyone up"
@@ -1056,16 +1147,16 @@ export function ProposalCard({
 
 const pc = {
   wrap: {
-    backgroundColor: "#fff",
-    borderRadius: 14,
+    backgroundColor: COLORS.surface,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#e5e7eb",
+    borderColor: COLORS.border,
     borderLeftWidth: 4,
-    borderLeftColor: COLORS.blue,
-    padding: 12,
-    gap: 4,
+    borderLeftColor: COLORS.brand,
+    padding: 14,
+    gap: 6,
   },
-  label: { fontSize: 12, fontWeight: "700" as const, color: COLORS.blue },
+  label: { fontSize: 12, fontWeight: "700" as const, color: COLORS.brand },
   notice: { fontSize: 13, color: "#b45309", marginTop: 4 },
 };
 

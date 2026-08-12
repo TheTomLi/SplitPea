@@ -351,6 +351,53 @@ check(
   }
 }
 
+{
+  const r = parseMessage("paid ten dollars for dinner", ctx);
+  check(
+    "word amount: simple number",
+    r.kind === "expense" &&
+      r.expense.amount === 10 &&
+      r.expense.description === "dinner",
+    r
+  );
+}
+
+{
+  const r = parseMessage("paid twenty-five bucks for dinner", ctx);
+  check(
+    "word amount: hyphenated number",
+    r.kind === "expense" && r.expense.amount === 25,
+    r
+  );
+}
+
+{
+  const r = parseMessage("spent one hundred and fifty dollars on a hotel", ctx);
+  check(
+    "word amount: hundreds with and",
+    r.kind === "expense" &&
+      r.expense.amount === 150 &&
+      r.expense.description === "hotel",
+    r
+  );
+}
+
+check(
+  "word amount: non-financial phrase is not an expense",
+  parseMessage("dinner for one", ctx).kind !== "expense"
+);
+
+{
+  const r = parseMessage("paid ten bucks at Five Guys", ctx);
+  check(
+    "word amount: number-like business name is preserved",
+    r.kind === "expense" &&
+      r.expense.amount === 10 &&
+      r.expense.description === "Five Guys",
+    r
+  );
+}
+
 // Split with a named person → sender + that person.
 {
   const r = parseMessage("paid $40 for dinner, split with Bob", ctx);
@@ -495,9 +542,9 @@ check(
 }
 
 {
-  const r = parseMessage("5 bucks on grocery", jctx);
+  const r = parseMessage("five bucks on grocery", jctx);
   check(
-    "joint compact: card pays for sender",
+    "joint compact: word amount and card pays for sender",
     r.kind === "expense" &&
       r.expense.amount === 5 &&
       r.expense.description === "grocery" &&
@@ -607,6 +654,22 @@ check(
       r.expense.paidByAccountId === "card" &&
       r.expense.splits.map((s) => `${s.memberId}:${s.mode}:${s.value}`).join(",") ===
         "tom:exact:20,emma:exact:10",
+    r
+  );
+}
+
+{
+  const r = parseMessage(
+    "Emma and I spent one hundred bucks at hotpot, split by seventy to me and thirty to her",
+    naturalJointCtx
+  );
+  check(
+    "joint natural: word total and exact word splits",
+    r.kind === "expense" &&
+      r.expense.amount === 100 &&
+      r.expense.description === "hotpot" &&
+      r.expense.splits.map((s) => `${s.memberId}:${s.mode}:${s.value}`).join(",") ===
+        "tom:exact:70,emma:exact:30",
     r
   );
 }
@@ -762,6 +825,10 @@ check("settleAll: were all even", isSettleAll("we're all even now"));
 check("settleAll: everything paid up", isSettleAll("everything is paid up"));
 // Guard: an expense that happens to contain "even"/a number is NOT settle-all.
 check("settleAll: 'we split 40 even' not settleAll", !isSettleAll("we split 40 even"));
+check(
+  "settleAll: 'we split forty even' not settleAll",
+  !isSettleAll("we split forty even")
+);
 // "settle up" (no all/everyone) is still the balance view, not settle-all.
 {
   const r = parseMessage("settle up", ctx);

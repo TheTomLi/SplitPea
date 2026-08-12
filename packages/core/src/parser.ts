@@ -79,6 +79,189 @@ export type ParseResult =
   | { kind: "irrelevant" };
 
 const MAX_LEN = 200;
+const ENGLISH_NUMBER_VALUES: Record<string, number> = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+};
+const ENGLISH_NUMBER_TOKEN =
+  "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|and";
+const ENGLISH_NUMBER_SEQUENCE = new RegExp(
+  `\\b(?:${ENGLISH_NUMBER_TOKEN})(?:[\\s-]+(?:${ENGLISH_NUMBER_TOKEN}))*\\b`,
+  "giu"
+);
+const SINGLE_ENGLISH_NUMBER = new RegExp(
+  `\\b(?:${ENGLISH_NUMBER_TOKEN})\\b`,
+  "giu"
+);
+
+/** Parse common spoken whole numbers, up through the thousands. */
+function parseEnglishNumberWords(value: string): number | null {
+  const tokens = value.toLowerCase().split(/[\s-]+/u).filter(Boolean);
+  let total = 0;
+  let group = 0;
+  let previous:
+    | "none"
+    | "unit"
+    | "teen"
+    | "tens"
+    | "hundred"
+    | "thousand"
+    | "and" = "none";
+  let sawNumber = false;
+  let sawScale = false;
+  let sawThousand = false;
+
+  for (const token of tokens) {
+    if (token === "and") {
+      // "and" joins scaled forms such as "one hundred and five". Treating
+      // "one and two" as a single amount would be an unsafe guess.
+      if (!sawScale || previous === "none" || previous === "and") return null;
+      previous = "and";
+      continue;
+    }
+
+    if (token === "hundred") {
+      if (previous === "hundred" || previous === "and") return null;
+      group = (group || 1) * 100;
+      previous = "hundred";
+      sawNumber = true;
+      sawScale = true;
+      continue;
+    }
+
+    if (token === "thousand") {
+      if (sawThousand || previous === "and") return null;
+      total += (group || 1) * 1000;
+      group = 0;
+      previous = "thousand";
+      sawNumber = true;
+      sawScale = true;
+      sawThousand = true;
+      continue;
+    }
+
+    const numeric = ENGLISH_NUMBER_VALUES[token];
+    if (numeric == null) return null;
+    const kind = numeric < 10 ? "unit" : numeric < 20 ? "teen" : "tens";
+    const mayFollowPrevious =
+      previous === "none" ||
+      previous === "hundred" ||
+      previous === "thousand" ||
+      previous === "and" ||
+      (previous === "tens" && kind === "unit");
+    if (!mayFollowPrevious) return null;
+
+    group += numeric;
+    previous = kind;
+    sawNumber = true;
+  }
+
+  if (!sawNumber || previous === "and") return null;
+  return total + group;
+}
+
+/**
+ * Turn spoken amounts into digits before the existing deterministic rules run.
+ * Restrict this to expense-looking messages so ordinary phrases such as
+ * "dinner for one" do not become expenses merely because they contain a word
+ * that happens to be a number.
+ */
+function normalizeExpenseNumberWords(value: string): string {
+  const hasFinancialCue =
+    /[$£€]|\b(?:paid|pay|spent|spend|bought|buy|cost|owe|owes|split|settle|gave|reimburse|repaid|bucks?|dollars?|expense|bill|total)\b/iu.test(
+      value
+    );
+  const startsWithWordAmount = new RegExp(
+    `^\\s*(?:${ENGLISH_NUMBER_TOKEN})(?:[\\s-]+(?:${ENGLISH_NUMBER_TOKEN}))*\\s+(?:on|for|at)\\b`,
+    "iu"
+  ).test(value);
+  if (!hasFinancialCue && !startsWithWordAmount) return value;
+
+  // Leave spoken decimals and cents for the LLM fallback until the deterministic
+  // parser can represent them without silently dropping part of the amount.
+  const spokenDecimal = new RegExp(
+    `\\b(?:${ENGLISH_NUMBER_TOKEN})\\s+point\\s+(?:${ENGLISH_NUMBER_TOKEN})\\b|\\bcents?\\b`,
+    "iu"
+  );
+  if (spokenDecimal.test(value)) return value;
+
+  return value.replace(ENGLISH_NUMBER_SEQUENCE, (sequence, offset: number) => {
+    const before = value.slice(0, offset);
+    const after = value.slice(offset + sequence.length);
+    const followsAmountVerb =
+      /(?:^|\b)(?:paid|pay|spent|spend|bought|buy|cost|costs|owe|owes|gave|reimburse|repaid|total|bill)\s*(?:about|around|roughly|approximately)?\s*\$?\s*$/iu.test(
+        before
+      );
+    const hasAmountSuffix =
+      /^\s*(?:bucks?|dollars?|shares?|parts?|portions?|pieces?|slices?|percent|percentage|pct|%|to\b|for\b|on\b)/iu.test(
+        after
+      );
+    const isLeadingAmount =
+      before.trim() === "" && /^\s*(?:on|for|at)\b/iu.test(after);
+    const isSplitValue =
+      /\bsplit\b/iu.test(value) &&
+      (/(?:\bsplit|\bby|\bis|\bare|=|:)\s*$/iu.test(before) ||
+        hasAmountSuffix);
+    const isTrailingSettlementAmount =
+      after.trim() === "" &&
+      /\b(?:paid|pay|owe|owes|gave|reimburse|repaid|settle|settled)\b/iu.test(
+        before
+      ) &&
+      !/\b(?:for|on|at)\s*$/iu.test(before);
+    const hasCurrencyPrefix = /[$£€]\s*$/u.test(before);
+
+    // Do not rewrite number-like proper nouns in the description or people
+    // list (for example, "Five Guys" or a member named "Seven").
+    if (
+      !followsAmountVerb &&
+      !hasAmountSuffix &&
+      !isLeadingAmount &&
+      !isSplitValue &&
+      !isTrailingSettlementAmount &&
+      !hasCurrencyPrefix
+    ) {
+      return sequence;
+    }
+
+    const parsed = parseEnglishNumberWords(sequence);
+    if (parsed != null) return String(parsed);
+
+    // Adjacent values such as "split fifty fifty" are two numbers rather than
+    // one malformed number. Convert the individual words while retaining the
+    // connecting text so the downstream split parser can interpret them.
+    return sequence.replace(SINGLE_ENGLISH_NUMBER, (token) => {
+      const single = parseEnglishNumberWords(token);
+      return single == null ? token : String(single);
+    });
+  });
+}
+
 const STRUCTURED_RESERVED_NAMES = new Set([
   "me",
   "i",
@@ -1071,11 +1254,12 @@ function looksLikeStructuredExpense(
 }
 
 export function parseMessage(text: string, ctx: ParseContext): ParseResult {
-  const raw = text.trim();
-  const lower = raw.toLowerCase();
+  const original = text.trim();
+  let raw = original;
+  let lower = raw.toLowerCase();
 
   // --- Tier 1: relevance gate ---------------------------------------------
-  if (!raw || raw.length > MAX_LEN) return { kind: "irrelevant" };
+  if (!original || original.length > MAX_LEN) return { kind: "irrelevant" };
 
   if (/^(help|what can you do|how do (i|you)|commands)\b/.test(lower)) {
     return { kind: "command", command: "help" };
@@ -1099,16 +1283,22 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   // Softer natural phrasings for "everyone's settled" ("we're all even",
   // "everything's paid up", "nobody owes anybody"). Only when there's no amount,
   // so they don't clash with an expense like "we split 40 even".
-  const noAmount = !/\d/.test(lower);
+  const clearlyNoOneOwes = /\bno(?:body|\s*one)\s+owes\b/.test(lower);
+  const noAmount = !/\d/.test(normalizeExpenseNumberWords(original));
   const looksAllEven =
-    noAmount &&
-    (/\bno(?:body|\s*one)\s+owes\b/.test(lower) ||
-      /\b(everything|everyone|everybody|all|we|we're|we are|were)\b[^.!?]*\bpaid\s+up\b/.test(lower) ||
-      /\b(all|everyone|everybody|we|we're|we are)\b[^.!?]*\beven\b/.test(lower));
+    clearlyNoOneOwes ||
+    (noAmount &&
+      (/\b(everything|everyone|everybody|all|we|we're|we are|were)\b[^.!?]*\bpaid\s+up\b/.test(lower) ||
+        /\b(all|everyone|everybody|we|we're|we are)\b[^.!?]*\beven\b/.test(lower)));
 
   if (looksAllSettled || looksAllEven) {
     return { kind: "command", command: "settleAll" };
   }
+
+  // Commands above need their original wording (notably "no one owes"). Only
+  // normalize number words once the message is known to be an expense candidate.
+  raw = normalizeExpenseNumberWords(original);
+  lower = raw.toLowerCase();
 
   const amountMatch = raw.match(/\$?\s*(\d+(?:[.,]\d{1,2})?)/);
 
