@@ -523,6 +523,29 @@ function detectCustomSplits(
     if (splits.length >= 1) return { splits };
   }
 
+  // Explicit shares ("1 share Tom and 2 shares Emma"). Share counts are
+  // weights, not dollar amounts, and therefore apply to the stated total.
+  if (/\b(?:shares?|parts?|portions?|pieces?|slices?)\b/i.test(raw)) {
+    const seen = new Set<string>();
+    const splits: ParsedSplit[] = [];
+    const push = (name: string, val: string) => {
+      const id = resolveMember(name, ctx);
+      const value = parseFloat(val);
+      if (id && !seen.has(id) && Number.isFinite(value) && value > 0) {
+        seen.add(id);
+        splits.push({ memberId: id, mode: "shares", value });
+      }
+    };
+    let m: RegExpExecArray | null;
+    const countFirst =
+      /(\d+(?:\.\d+)?)\s*(?:shares?|parts?|portions?|pieces?|slices?)\b\s+(?:(?:to|for)\s+)?([A-Za-z]+)/gi;
+    while ((m = countFirst.exec(raw))) push(m[2], m[1]);
+    const nameFirst =
+      /([A-Za-z]+)\s*(?:gets?|has|have|takes?|:|=)?\s*(\d+(?:\.\d+)?)\s*(?:shares?|parts?|portions?|pieces?|slices?)/gi;
+    while ((m = nameFirst.exec(raw))) push(m[1], m[2]);
+    if (splits.length >= 2) return { splits };
+  }
+
   // Exact amounts to people ("20 to tom", "tom pays 20"). Need ≥2 to be sure.
   {
     const seen = new Set<string>();
@@ -547,6 +570,112 @@ function detectCustomSplits(
   }
 
   return null;
+}
+
+function splitNaturalDescriptionAndPeople(
+  value: string,
+  ctx: ParseContext
+): { description: string; beneficiaries: ReturnType<typeof resolveStructuredMembers> } | null {
+  const marker = /\s+(only\s+for|for|with)\s+/giu;
+  const candidates: { index: number; end: number; kind: string }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = marker.exec(value))) {
+    candidates.push({ index: match.index, end: marker.lastIndex, kind: match[1].toLowerCase() });
+  }
+
+  for (const candidate of candidates.reverse()) {
+    const description = value.slice(0, candidate.index).trim().replace(/[,.!?:;]+$/u, "");
+    const peoplePhrase = value.slice(candidate.end).trim().replace(/[.!?]+$/u, "");
+    if (/\bsplit\b/iu.test(description) || /\d/u.test(description)) continue;
+    const resolved = resolveStructuredMembers(peoplePhrase, ctx);
+    if (!description || !resolved) continue;
+    const memberIds = new Set(resolved.memberIds);
+    if (candidate.kind === "with" && ctx.members.some((m) => m.id === ctx.senderMemberId)) {
+      memberIds.add(ctx.senderMemberId);
+    }
+    return {
+      description,
+      beneficiaries: {
+        memberIds: ctx.members.map((m) => m.id).filter((id) => memberIds.has(id)),
+        corrections: resolved.corrections,
+      },
+    };
+  }
+  return null;
+}
+
+/** Common split-bills wording with an explicit payer and people clause. */
+function parseNaturalPaidExpense(raw: string, ctx: ParseContext): ParseResult | null {
+  if ((ctx.mode ?? "split") !== "split") return null;
+  const match = raw.match(
+    /^\s*(?:(.+?)\s+)?(paid|covered)\s+\$?\s*((?:\d+(?:[.,]\d{1,2})?|[.,]\d{1,2}))\s*(?:bucks?|dollars?)?\s+(?:for|on|at)\s+(.+?)\s*[.!?]*$/iu
+  );
+  if (!match) return null;
+
+  const payer = match[1]
+    ? resolveStructuredPayer(match[1], ctx)
+    : resolveStructuredPayer("me", ctx);
+  const amount = parseFloat(match[3].replace(",", "."));
+  const parts = splitNaturalDescriptionAndPeople(match[4], ctx);
+  if (!parts) return null;
+  if (!payer || !Number.isFinite(amount) || amount <= 0) {
+    return { kind: "invalid" };
+  }
+  return {
+    kind: "expense",
+    expense: {
+      amount,
+      description: parts.description,
+      category: null,
+      paidByMemberId: payer.memberId,
+      paidByAccountId: payer.accountId,
+      splits: parts.beneficiaries!.memberIds.map((memberId) => ({
+        memberId,
+        mode: "even",
+        value: 1,
+      })),
+      ...(payer.correction || parts.beneficiaries!.corrections.length > 0
+        ? {
+            corrections: [
+              ...(payer.correction ? [payer.correction] : []),
+              ...parts.beneficiaries!.corrections,
+            ],
+          }
+        : {}),
+    },
+  };
+}
+
+/** "The card paid $45 for dinner for Tom and Emma" in shared-card mode. */
+function parseJointCardPaidExpense(raw: string, ctx: ParseContext): ParseResult | null {
+  if ((ctx.mode ?? "split") !== "joint" || !/^\s*(?:the\s+)?(?:shared\s+)?card\s+paid\b/iu.test(raw)) {
+    return null;
+  }
+  const match = raw.match(
+    /^\s*(?:the\s+)?(?:shared\s+)?card\s+paid\s+\$?\s*((?:\d+(?:[.,]\d{1,2})?|[.,]\d{1,2}))\s*(?:bucks?|dollars?)?\s+(?:for|on|at)\s+(.+?)\s*[.!?]*$/iu
+  );
+  if (!match || !ctx.cardAccountId) return { kind: "invalid" };
+  const amount = parseFloat(match[1].replace(",", "."));
+  const parts = splitNaturalDescriptionAndPeople(match[2], ctx);
+  if (!Number.isFinite(amount) || amount <= 0 || !parts) return { kind: "invalid" };
+  return {
+    kind: "expense",
+    expense: {
+      amount,
+      description: parts.description,
+      category: null,
+      paidByMemberId: null,
+      paidByAccountId: ctx.cardAccountId,
+      splits: parts.beneficiaries!.memberIds.map((memberId) => ({
+        memberId,
+        mode: "even",
+        value: 1,
+      })),
+      ...(parts.beneficiaries!.corrections.length > 0
+        ? { corrections: parts.beneficiaries!.corrections }
+        : {}),
+    },
+  };
 }
 
 /** Best-effort description for a custom-split message (strips names/numbers/filler). */
@@ -891,6 +1020,30 @@ function parseJointNaturalExpense(
       mode: "exact",
       value: parseFloat(exactMatch[1].replace(",", ".")),
     });
+  }
+
+  // Also accept compact allocations after a clear separator, e.g.
+  // "at Costco, 60 Kevin 30 Emma". Restrict targets to a single name so an
+  // item price in the description cannot be mistaken for a person.
+  if (exactSplits.length === 0) {
+    const hasCompactAllocations =
+      /[,;:]\s*\$?\s*\d+(?:[.,]\d{1,2})?\s+[\p{L}][\p{L}'’.-]*\s+\$?\s*\d/iu.test(tail);
+    const bareExactPattern =
+      /\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:bucks?|dollars?)?\s+([\p{L}][\p{L}'’.-]*)/giu;
+    while (hasCompactAllocations && (exactMatch = bareExactPattern.exec(tail))) {
+      const named = resolveStructuredMembers(exactMatch[2], ctx);
+      if (!named || named.memberIds.length !== 1) continue;
+      firstExactIndex ??= exactMatch.index;
+      const memberId = named.memberIds[0];
+      if (seenExactMembers.has(memberId)) return { kind: "invalid" };
+      seenExactMembers.add(memberId);
+      exactCorrections.push(...named.corrections);
+      exactSplits.push({
+        memberId,
+        mode: "exact",
+        value: parseFloat(exactMatch[1].replace(",", ".")),
+      });
+    }
   }
 
   if (exactSplits.length >= 2) {
@@ -1265,6 +1418,16 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
     return { kind: "command", command: "help" };
   }
 
+  // Parser-manipulation text is not evidence of a real-world transaction.
+  // Keep it out of the LLM fallback entirely instead of asking a model to
+  // decide whether to obey an instruction embedded in user content.
+  if (
+    /\bignore\b[^.!?]{0,40}\b(?:instructions?|rules?|prompt)\b/i.test(original) ||
+    /\b(?:do\s+not|don['’]?t)\s+(?:add|create|record|log)\b[^.!?]{0,30}\bexpense\b/i.test(original)
+  ) {
+    return { kind: "invalid" };
+  }
+
   // Date-scoped statement commands must run before the generic balance and
   // settle-up checks below. Otherwise "balances between Sep 1 and Oct 1" would
   // accidentally show the all-time balance.
@@ -1300,7 +1463,9 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   raw = normalizeExpenseNumberWords(original);
   lower = raw.toLowerCase();
 
-  const amountMatch = raw.match(/\$?\s*(\d+(?:[.,]\d{1,2})?)/);
+  const amountMatch = raw.match(
+    /\$?\s*((?:\d+(?:[.,]\d{1,2})?|[.,]\d{1,2}))/
+  );
 
   // Balance view: "balance", "who owes", or a bare "settle up" (no amount).
   if (
@@ -1328,6 +1493,9 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   const structured = parseStructuredExpense(raw, ctx);
   if (structured) return structured;
 
+  const naturalPaid = parseNaturalPaidExpense(raw, ctx);
+  if (naturalPaid) return naturalPaid;
+
   const jointNatural = parseJointNaturalExpense(raw, ctx);
   if (jointNatural) return jointNatural;
 
@@ -1335,6 +1503,9 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
   // parser so the trailing "for people" clause cannot become description text.
   const jointItemForPeople = parseJointItemForPeopleExpense(raw, ctx);
   if (jointItemForPeople) return jointItemForPeople;
+
+  const jointCardPaid = parseJointCardPaidExpense(raw, ctx);
+  if (jointCardPaid) return jointCardPaid;
 
   // A message that clearly attempted the guided formula must not fall through
   // to the looser legacy rules, which could silently change its payer or people.
@@ -1345,6 +1516,12 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
 
   // A non-even split ("20 to tom, 30 to emma", "me 60% emma 40%", "6 slices…").
   const custom = detectCustomSplits(raw, lower, ctx);
+
+  // "I owe Emma $20" describes an existing debt; it is neither a new expense
+  // nor proof that money was repaid. Fail closed instead of changing balances.
+  if (/^\s*(?:i|[\p{L}][\p{L}'’.-]*)\s+owes?\s+[\p{L}][\p{L}'’.-]*\s+\$?\s*(?:\d|[.,]\d)/iu.test(raw)) {
+    return { kind: "invalid" };
+  }
 
   // Settlement ("I paid Bob 20") — but not when it's really a multi-person split.
   if (!custom) {
@@ -1428,7 +1605,15 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
         break;
       }
     }
-    if (paidByAccountId == null && subjMatch) {
+    const trailingPayer = work.match(
+      /(?:^|[,;])\s*([\p{L}][\p{L}'’.-]*|me|i|myself)\s+paid\b\s*[,;]?/iu
+    );
+    if (paidByAccountId == null && trailingPayer) {
+      const payer = resolveStructuredPayer(trailingPayer[1], ctx);
+      if (!payer || payer.accountId) return { kind: "unparsed" };
+      paidByMemberId = payer.memberId;
+      work = work.replace(trailingPayer[0], " ");
+    } else if (paidByAccountId == null && subjMatch) {
       const who = resolveMember(subject.split(/\s+/)[0], ctx);
       if (who) {
         paidByMemberId = who;
@@ -1499,7 +1684,7 @@ export function parseMessage(text: string, ctx: ParseContext): ParseResult {
     if (descPrep) d = descPrep[1];
     else d = work.replace(/\b(paid|pay|spent|spend|bought|buy|owe|cost)\b/gi, " ");
     d = d
-      .replace(/\$?\s*\d+(?:[.,]\d{1,2})?/g, " ")
+      .replace(/\$?\s*(?:\d+(?:[.,]\d{1,2})?|[.,]\d{1,2})/g, " ")
       .replace(
         /\b(dollars?|bucks?|evenly|even|everyone|everybody|all|us|them|together|total|each)\b/gi,
         " "

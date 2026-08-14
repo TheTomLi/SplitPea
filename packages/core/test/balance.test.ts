@@ -1,5 +1,10 @@
 // Lightweight assertion-based tests (run with: npx tsx packages/core/test/balance.test.ts)
-import { computeBalances, type BalanceInput } from "../src/balance";
+import {
+  computeBalances,
+  computeSplitCents,
+  validateExpenseSplits,
+  type BalanceInput,
+} from "../src/balance";
 
 let passed = 0;
 let failed = 0;
@@ -167,6 +172,53 @@ function net(input: BalanceInput) {
   };
   const b = computeBalances(input).balances.find((x) => x.memberId === "A")!;
   eq("joint settlement owes card 50", -b.net, 50);
+}
+
+// 8. Invalid exact allocations are rejected and can never produce a negative
+//    owed amount even if a legacy row bypassed validation.
+{
+  const bad = [
+    { memberId: "A", mode: "exact" as const, value: 100 },
+    { memberId: "B", mode: "exact" as const, value: 100 },
+  ];
+  eq(
+    "mismatched exact split is invalid",
+    validateExpenseSplits(10, bad),
+    "exact split amounts must add up to 10.00"
+  );
+  eq(
+    "legacy mismatched exact split stays non-negative and reconciled",
+    Object.fromEntries(computeSplitCents(1000, bad)),
+    { A: 500, B: 500 }
+  );
+}
+
+// 9. Percent totals, duplicate people, and mixed modes fail closed.
+{
+  eq(
+    "mismatched percentages are invalid",
+    validateExpenseSplits(10, [
+      { memberId: "A", mode: "percent", value: 70 },
+      { memberId: "B", mode: "percent", value: 20 },
+    ]),
+    "percentage splits must add up to 100%"
+  );
+  eq(
+    "duplicate split member is invalid",
+    validateExpenseSplits(10, [
+      { memberId: "A", mode: "even", value: 1 },
+      { memberId: "A", mode: "even", value: 1 },
+    ]),
+    "a person can only appear once in a split"
+  );
+  eq(
+    "mixed split modes are invalid",
+    validateExpenseSplits(10, [
+      { memberId: "A", mode: "even", value: 1 },
+      { memberId: "B", mode: "shares", value: 1 },
+    ]),
+    "all splits must use the same mode"
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

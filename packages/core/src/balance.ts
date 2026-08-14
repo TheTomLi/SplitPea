@@ -73,6 +73,57 @@ export interface BalanceResult {
 const toCents = (dollars: number): number => Math.round(dollars * 100);
 const toDollars = (cents: number): number => Math.round(cents) / 100;
 
+const SPLIT_MODES = new Set<SplitMode>(["even", "shares", "percent", "exact"]);
+
+/**
+ * Validate a complete expense allocation before it is shown or persisted.
+ * Exact splits reconcile in cents; percentages reconcile to two decimal places.
+ */
+export function validateExpenseSplits(
+  amount: number,
+  splits: BalanceSplit[]
+): string | null {
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return "amount must be a positive number";
+  }
+  if (splits.length === 0) return "at least one split is required";
+
+  const memberIds = new Set<string>();
+  const mode = splits[0].mode;
+  if (!SPLIT_MODES.has(mode)) return "split mode is invalid";
+
+  for (const split of splits) {
+    if (!split.memberId.trim()) return "every split must name a member";
+    if (memberIds.has(split.memberId)) return "a person can only appear once in a split";
+    memberIds.add(split.memberId);
+    if (split.mode !== mode) return "all splits must use the same mode";
+    if (!Number.isFinite(split.value)) return "split values must be finite numbers";
+    if (mode === "exact" ? split.value < 0 : split.value <= 0) {
+      return "split values must be positive";
+    }
+  }
+
+  if (mode === "exact") {
+    const splitCents = splits.reduce((sum, split) => sum + toCents(split.value), 0);
+    const amountCents = toCents(amount);
+    if (splitCents !== amountCents) {
+      return `exact split amounts must add up to ${toDollars(amountCents).toFixed(2)}`;
+    }
+  }
+
+  if (mode === "percent") {
+    const percentHundredths = splits.reduce(
+      (sum, split) => sum + Math.round(split.value * 100),
+      0
+    );
+    if (percentHundredths !== 10_000) {
+      return "percentage splits must add up to 100%";
+    }
+  }
+
+  return null;
+}
+
 /**
  * Split `amountCents` across `weights` so the parts are integers that sum
  * exactly to `amountCents` (largest-remainder method).
@@ -111,20 +162,32 @@ export function computeSplitCents(
   let cents: number[];
 
   if (mode === "exact") {
-    // Values are exact dollar amounts. Reconcile any rounding drift against the
-    // largest share so the parts sum exactly to the expense amount.
-    cents = splits.map((s) => toCents(s.value));
-    const drift = amountCents - cents.reduce((a, b) => a + b, 0);
-    if (drift !== 0) {
-      let maxIdx = 0;
-      for (let i = 1; i < cents.length; i++) if (cents[i] > cents[maxIdx]) maxIdx = i;
-      cents[maxIdx] += drift;
-    }
+    const requested = splits.map((s) =>
+      Number.isFinite(s.value) ? Math.max(0, toCents(s.value)) : 0
+    );
+    const requestedTotal = requested.reduce((a, b) => a + b, 0);
+    // New writes are validated before persistence. For legacy/corrupt rows,
+    // preserve the stated proportions instead of applying a negative drift to
+    // one person (which could make an expense credit them money).
+    cents =
+      requestedTotal === amountCents
+        ? requested
+        : distributeByWeights(
+            Math.max(0, amountCents),
+            requestedTotal > 0 ? requested : splits.map(() => 1)
+          );
   } else {
     // even / shares / percent are all proportional distributions.
     const weights =
-      mode === "even" ? splits.map(() => 1) : splits.map((s) => s.value);
-    cents = distributeByWeights(amountCents, weights);
+      mode === "even"
+        ? splits.map(() => 1)
+        : splits.map((s) =>
+            Number.isFinite(s.value) ? Math.max(0, s.value) : 0
+          );
+    const safeWeights = weights.some((weight) => weight > 0)
+      ? weights
+      : splits.map(() => 1);
+    cents = distributeByWeights(Math.max(0, amountCents), safeWeights);
   }
 
   splits.forEach((s, i) => {

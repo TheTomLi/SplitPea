@@ -632,10 +632,17 @@ function ChatScreen({
       ? `Try: ${otherLabel} and I spent $30…`
       : "Try: I spent $30 on dinner…"
     : `Try: $40 on dinner, paid by ${examplePayer}…`;
+  const hasPendingAction = Boolean(
+    proposal || settlement || settleAll || statementPeriod
+  );
 
   async function handleSend() {
     const t = text.trim();
     if (!t) return;
+    if (hasPendingAction) {
+      setError("Confirm, edit, or cancel the pending action before sending another message.");
+      return;
+    }
     setText("");
     setSending(true);
     setError(null);
@@ -665,7 +672,7 @@ function ChatScreen({
         paidByMemberId: proposal.paidByMemberId ?? undefined,
         paidByAccountId: proposal.paidByAccountId ?? undefined,
         splits: proposal.splits,
-        createdVia: "rules",
+        createdVia: proposal.createdVia,
       });
       setProposal(null);
       await refresh();
@@ -916,8 +923,14 @@ function ChatScreen({
           onChangeText={setText}
           onSubmitEditing={handleSend}
           returnKeyType="send"
+          editable={!sending && !hasPendingAction}
+          maxLength={200}
         />
-        <Button label="Send" onPress={handleSend} disabled={sending} />
+        <Button
+          label={hasPendingAction ? "Review above" : "Send"}
+          onPress={handleSend}
+          disabled={sending || hasPendingAction}
+        />
       </View>
 
       {overlay === "expense" && (

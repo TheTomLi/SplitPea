@@ -6,6 +6,7 @@ import {
   computeSplitCents,
   formatStructuredMemberName,
   parseMessage,
+  validateExpenseSplits,
   type SplitMode,
 } from "@splitpea/core";
 import { isLLMEnabled, llmParse } from "./llm";
@@ -17,24 +18,6 @@ import {
 import { cleanupExpiredGroups } from "./retention";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
-
-// Warn when a custom split's numbers don't reconcile: by-amount parts should sum
-// to the total, and percentages should sum to 100%.
-function splitSumNotice(
-  amount: number,
-  splits: { mode: string; value: number }[]
-): string | null {
-  if (splits.length === 0) return null;
-  const mode = splits[0].mode;
-  const sum = splits.reduce((a, s) => a + s.value, 0);
-  if (mode === "percent" && Math.abs(sum - 100) > 0.5) {
-    return `Heads up: the percentages add up to ${Number(sum.toFixed(2))}%, not 100% — tap Edit to fix the split.`;
-  }
-  if (mode === "exact" && Math.abs(sum - amount) > 0.01) {
-    return `Heads up: the amounts add up to ${money(sum)}, but the total is ${money(amount)} — tap Edit to fix the split.`;
-  }
-  return null;
-}
 
 // Compute balances for a group, enriched with member names for display.
 async function computeGroupBalances(groupId: string) {
@@ -92,6 +75,52 @@ api.use(mutationLimiter);
 /** Look up a group by its invite code, throwing a 404-style null if missing. */
 async function findGroup(inviteCode: string) {
   return prisma.group.findUnique({ where: { inviteCode } });
+}
+
+const MAX_NAME_LENGTH = 80;
+const MAX_GROUP_NAME_LENGTH = 120;
+const MAX_MESSAGE_LENGTH = 200;
+
+function requiredText(
+  value: unknown,
+  label: string,
+  maxLength: number
+): { value: string } | { error: string } {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return { error: `${label} is required` };
+  if (trimmed.length > maxLength) {
+    return { error: `${label} must be ${maxLength} characters or fewer` };
+  }
+  return { value: trimmed };
+}
+
+const normalizedName = (value: string) => value.trim().toLocaleLowerCase();
+
+async function findGroupMember(
+  groupId: string,
+  memberId: unknown,
+  activeOnly = true
+) {
+  return prisma.member.findFirst({
+    where: {
+      id: String(memberId ?? ""),
+      groupId,
+      ...(activeOnly ? { removedAt: null } : {}),
+    },
+  });
+}
+
+async function findGroupAccount(groupId: string, accountId: unknown) {
+  return prisma.account.findFirst({
+    where: { id: String(accountId ?? ""), groupId },
+  });
+}
+
+async function findMemberByName(groupId: string, name: string) {
+  const key = normalizedName(name);
+  const members = await prisma.member.findMany({ where: { groupId } });
+  const matches = members.filter((member) => normalizedName(member.name) === key);
+  return matches.find((member) => member.removedAt == null) ?? matches[0] ?? null;
 }
 
 async function touchGroup(groupId: string) {
@@ -217,24 +246,36 @@ api.get("/health", (_req, res) => {
 // single card account that every spend is charged to.
 api.post("/groups", createGroupLimiter, async (req, res) => {
   const { name, creatorName, type, cardName, participants } = req.body ?? {};
-  if (!name || !creatorName) {
-    return res.status(400).json({ error: "name and creatorName are required" });
-  }
+  const groupName = requiredText(name, "name", MAX_GROUP_NAME_LENGTH);
+  if ("error" in groupName) return res.status(400).json({ error: groupName.error });
+  const creatorResult = requiredText(creatorName, "creatorName", MAX_NAME_LENGTH);
+  if ("error" in creatorResult) return res.status(400).json({ error: creatorResult.error });
   const groupType = type === "joint" ? "joint" : "split";
 
-  // Extra participant names (besides the creator), de-duplicated.
-  const creator = String(creatorName).trim();
-  const extras = Array.isArray(participants)
-    ? [...new Set(
-        (participants as unknown[])
-          .map((p) => String(p).trim())
-          .filter((p) => p && p.toLowerCase() !== creator.toLowerCase())
-      )]
-    : [];
+  // Extra participant names (besides the creator), de-duplicated without
+  // case sensitivity so "Emma" and "emma" can never become two people.
+  const creator = creatorResult.value;
+  const extraByKey = new Map<string, string>();
+  if (Array.isArray(participants)) {
+    for (const participant of participants as unknown[]) {
+      const parsed = requiredText(participant, "participant name", MAX_NAME_LENGTH);
+      if ("error" in parsed) {
+        if (String(participant ?? "").trim()) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        continue;
+      }
+      const key = normalizedName(parsed.value);
+      if (key !== normalizedName(creator) && !extraByKey.has(key)) {
+        extraByKey.set(key, parsed.value);
+      }
+    }
+  }
+  const extras = [...extraByKey.values()];
 
   const group = await prisma.group.create({
     data: {
-      name: String(name).trim(),
+      name: groupName.value,
       type: groupType,
       inviteCode: generateInviteCode(),
       members: { create: [{ name: creator }, ...extras.map((n) => ({ name: n }))] },
@@ -286,19 +327,23 @@ api.delete("/groups/:inviteCode", async (req, res) => {
 // Join a group by name. Reuses an existing member with the same name.
 api.post("/groups/:inviteCode/join", async (req, res) => {
   const { name } = req.body ?? {};
-  if (!name) return res.status(400).json({ error: "name is required" });
+  const parsedName = requiredText(name, "name", MAX_NAME_LENGTH);
+  if ("error" in parsedName) return res.status(400).json({ error: parsedName.error });
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   await touchGroup(group.id);
 
-  const trimmed = String(name).trim();
-  let member = await prisma.member.findFirst({
-    where: { groupId: group.id, name: trimmed },
-  });
+  const trimmed = parsedName.value;
+  let member = await findMemberByName(group.id, trimmed);
   if (!member) {
     member = await prisma.member.create({
       data: { groupId: group.id, name: trimmed },
+    });
+  } else if (member.removedAt) {
+    member = await prisma.member.update({
+      where: { id: member.id },
+      data: { removedAt: null },
     });
   }
 
@@ -308,24 +353,22 @@ api.post("/groups/:inviteCode/join", async (req, res) => {
 // Add a participant to a group (name must be unique within the group).
 api.post("/groups/:inviteCode/members", async (req, res) => {
   const { name } = req.body ?? {};
-  if (!name) return res.status(400).json({ error: "name is required" });
+  const parsedName = requiredText(name, "name", MAX_NAME_LENGTH);
+  if ("error" in parsedName) return res.status(400).json({ error: parsedName.error });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   await touchGroup(group.id);
 
-  const trimmed = String(name).trim();
-  const existingActive = await prisma.member.findFirst({
-    where: { groupId: group.id, name: trimmed, removedAt: null },
-  });
+  const trimmed = parsedName.value;
+  const existing = await findMemberByName(group.id, trimmed);
+  const existingActive = existing?.removedAt == null ? existing : null;
   if (existingActive) {
     return res.status(409).json({ error: "a member with that name already exists" });
   }
 
   // If someone with this name left earlier, bring them back (with their history)
   // instead of blocking — they were settled up when they left.
-  const removed = await prisma.member.findFirst({
-    where: { groupId: group.id, name: trimmed, removedAt: { not: null } },
-  });
+  const removed = existing?.removedAt ? existing : null;
   if (removed) {
     const member = await prisma.member.update({
       where: { id: removed.id },
@@ -341,14 +384,22 @@ api.post("/groups/:inviteCode/members", async (req, res) => {
 // Rename a participant.
 api.patch("/groups/:inviteCode/members/:memberId", async (req, res) => {
   const { name } = req.body ?? {};
-  if (!name) return res.status(400).json({ error: "name is required" });
+  const parsedName = requiredText(name, "name", MAX_NAME_LENGTH);
+  if ("error" in parsedName) return res.status(400).json({ error: parsedName.error });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
   await touchGroup(group.id);
 
+  const current = await findGroupMember(group.id, req.params.memberId);
+  if (!current) return res.status(404).json({ error: "member not found in this group" });
+  const duplicate = await findMemberByName(group.id, parsedName.value);
+  if (duplicate && duplicate.id !== current.id) {
+    return res.status(409).json({ error: "a member with that name already exists" });
+  }
+
   const member = await prisma.member.update({
-    where: { id: req.params.memberId },
-    data: { name: String(name).trim() },
+    where: { id: current.id },
+    data: { name: parsedName.value },
   });
   res.json({ member });
 });
@@ -362,6 +413,8 @@ api.delete("/groups/:inviteCode/members/:memberId", async (req, res) => {
   if (!group) return res.status(404).json({ error: "group not found" });
   await touchGroup(group.id);
   const memberId = req.params.memberId;
+  const member = await findGroupMember(group.id, memberId);
+  if (!member) return res.status(404).json({ error: "member not found in this group" });
 
   const [splits, paidExpenses, ownedAccounts, payments] = await Promise.all([
     prisma.split.count({ where: { memberId } }),
@@ -479,16 +532,18 @@ function helpText(
 // here; the client confirms via POST /expenses.
 api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
   const { memberId, text } = req.body ?? {};
-  if (!memberId || !text) {
-    return res.status(400).json({ error: "memberId and text are required" });
-  }
+  if (!memberId) return res.status(400).json({ error: "memberId is required" });
+  const parsedText = requiredText(text, "text", MAX_MESSAGE_LENGTH);
+  if ("error" in parsedText) return res.status(400).json({ error: parsedText.error });
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  const sender = await findGroupMember(group.id, memberId);
+  if (!sender) return res.status(400).json({ error: "memberId is not an active member of this group" });
   await touchGroup(group.id);
 
   const userMessage = await prisma.message.create({
-    data: { groupId: group.id, memberId: String(memberId), role: "user", text: String(text) },
+    data: { groupId: group.id, memberId: sender.id, role: "user", text: parsedText.value },
   });
 
   const [members, accounts] = await Promise.all([
@@ -499,27 +554,29 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
   const isJoint = group.type === "joint";
   const cardAccountId = isJoint ? accounts[0]?.id ?? null : null;
 
-  let result = parseMessage(String(text), {
+  let result = parseMessage(parsedText.value, {
     members: members.map((m) => ({ id: m.id, name: m.name })),
     accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
-    senderMemberId: String(memberId),
+    senderMemberId: sender.id,
     mode: isJoint ? "joint" : "split",
     cardAccountId,
   });
 
   // Tier 3: if the rules couldn't parse an expense-looking message, ask the LLM.
   let unknownNames: string[] = [];
+  let parsedVia: "rules" | "llm" = "rules";
   if (result.kind === "unparsed" && isLLMEnabled()) {
-    const llm = await llmParse(String(text), {
+    const llm = await llmParse(parsedText.value, {
       members: members.map((m) => ({ id: m.id, name: m.name })),
       accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
-      senderMemberId: String(memberId),
+      senderMemberId: sender.id,
       mode: isJoint ? "joint" : "split",
       cardAccountId,
     });
     if (llm) {
       result = llm.result;
       unknownNames = llm.unknownNames;
+      parsedVia = "llm";
     }
   }
 
@@ -574,6 +631,15 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
   // Expense → return an ephemeral proposal (not stored, not committed).
   if (result.kind === "expense") {
     const e = result.expense;
+    const splitError = validateExpenseSplits(e.amount, e.splits);
+    if (splitError) {
+      return res.json({
+        userMessage,
+        hostMessage: await hostReply(
+          `I couldn't safely create that expense: ${splitError}. Please correct the total or split and try again.`
+        ),
+      });
+    }
     const nameOf = (id: string) => members.find((m) => m.id === id)?.name ?? "?";
     const payerLabel = e.paidByMemberId
       ? nameOf(e.paidByMemberId)
@@ -600,7 +666,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
           .join(" ")} Please check the expense before confirming.`
       : null;
     const notice =
-      [correctionNotice, unknownNotice, splitSumNotice(e.amount, e.splits)]
+      [correctionNotice, unknownNotice]
         .filter(Boolean)
         .join(" ") || undefined;
     return res.json({
@@ -617,6 +683,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
         splitMemberNames,
         splitBreakdown,
         notice,
+        createdVia: parsedVia,
       },
     });
   }
@@ -695,7 +762,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
     return res.json({
       userMessage,
       hostMessage: await hostReply(
-        helpText(isJoint, members, String(memberId), accounts[0]?.name)
+        helpText(isJoint, members, sender.id, accounts[0]?.name)
       ),
     });
   }
@@ -710,7 +777,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
       userMessage,
       hostMessage: await hostReply(
         invalidMessage +
-          `\"${expenseExample(isJoint, members, String(memberId))}\"`
+          `\"${expenseExample(isJoint, members, sender.id)}\"`
       ),
     });
   }
@@ -723,7 +790,7 @@ api.post("/groups/:inviteCode/messages", messageLimiter, async (req, res) => {
         `I'm not sure what you mean 🤔 Try \"${expenseExample(
           isJoint,
           members,
-          String(memberId)
+          sender.id
         )}\", or type \"help\".`
       ),
     });
@@ -753,15 +820,19 @@ api.get("/groups/:inviteCode/accounts", async (req, res) => {
 
 api.post("/groups/:inviteCode/accounts", async (req, res) => {
   const { name, paidByMemberId } = req.body ?? {};
-  if (!name) return res.status(400).json({ error: "name is required" });
+  const parsedName = requiredText(name, "name", MAX_NAME_LENGTH);
+  if ("error" in parsedName) return res.status(400).json({ error: parsedName.error });
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  if (paidByMemberId && !(await findGroupMember(group.id, paidByMemberId))) {
+    return res.status(400).json({ error: "paidByMemberId is not an active member of this group" });
+  }
   await touchGroup(group.id);
 
   const account = await prisma.account.create({
     data: {
       groupId: group.id,
-      name: String(name).trim(),
+      name: parsedName.value,
       paidByMemberId: paidByMemberId ? String(paidByMemberId) : null,
     },
   });
@@ -865,12 +936,12 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
     req.body ?? {};
 
   const amt = Number(amount);
-  if (!Number.isFinite(amt) || amt <= 0) {
-    return res.status(400).json({ error: "amount must be a positive number" });
+  const parsedDescription = requiredText(description, "description", 200);
+  if ("error" in parsedDescription) {
+    return res.status(400).json({ error: parsedDescription.error });
   }
-  if (!description) return res.status(400).json({ error: "description is required" });
-  if (!paidByMemberId && !paidByAccountId) {
-    return res.status(400).json({ error: "a payer (member or account) is required" });
+  if (Boolean(paidByMemberId) === Boolean(paidByAccountId)) {
+    return res.status(400).json({ error: "provide exactly one payer: a member or an account" });
   }
   if (!Array.isArray(splits) || splits.length === 0) {
     return res.status(400).json({ error: "at least one split is required" });
@@ -882,23 +953,45 @@ api.post("/groups/:inviteCode/expenses", async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+
+  const normalizedSplits = (splits as SplitInput[]).map((split) => ({
+    memberId: String(split.memberId ?? ""),
+    mode: String(split.mode ?? "even") as SplitMode,
+    value: Number(split.value ?? 1),
+  }));
+  const splitError = validateExpenseSplits(amt, normalizedSplits);
+  if (splitError) return res.status(400).json({ error: splitError });
+
+  const activeMembers = await prisma.member.findMany({
+    where: { groupId: group.id, removedAt: null },
+  });
+  const activeMemberIds = new Set(activeMembers.map((member) => member.id));
+  if (normalizedSplits.some((split) => !activeMemberIds.has(split.memberId))) {
+    return res.status(400).json({ error: "every split member must be active in this group" });
+  }
+  if (paidByMemberId && !activeMemberIds.has(String(paidByMemberId))) {
+    return res.status(400).json({ error: "payer must be an active member of this group" });
+  }
+  if (paidByAccountId && !(await findGroupAccount(group.id, paidByAccountId))) {
+    return res.status(400).json({ error: "payer account does not belong to this group" });
+  }
   await touchGroup(group.id);
 
   const expense = await prisma.expense.create({
     data: {
       groupId: group.id,
       amount: amt,
-      description: String(description).trim(),
+      description: parsedDescription.value,
       category: category ? String(category) : null,
       paidByMemberId: paidByMemberId ? String(paidByMemberId) : null,
       paidByAccountId: paidByAccountId ? String(paidByAccountId) : null,
       createdVia: createdVia === "rules" || createdVia === "llm" ? createdVia : "manual",
       date: expenseDate?.date,
       splits: {
-        create: (splits as SplitInput[]).map((s) => ({
-          memberId: String(s.memberId),
-          mode: (s.mode ?? "even") as string,
-          value: Number(s.value ?? 1),
+        create: normalizedSplits.map((s) => ({
+          memberId: s.memberId,
+          mode: s.mode,
+          value: s.value,
         })),
       },
     },
@@ -975,12 +1068,27 @@ api.post("/groups/:inviteCode/payments", async (req, res) => {
 
   const group = await findGroup(req.params.inviteCode);
   if (!group) return res.status(404).json({ error: "group not found" });
+  const fromMember = await findGroupMember(group.id, fromMemberId);
+  if (!fromMember) {
+    return res.status(400).json({ error: "fromMemberId is not an active member of this group" });
+  }
+  if (toMemberId) {
+    const toMember = await findGroupMember(group.id, toMemberId);
+    if (!toMember) {
+      return res.status(400).json({ error: "toMemberId is not an active member of this group" });
+    }
+    if (toMember.id === fromMember.id) {
+      return res.status(400).json({ error: "a member cannot pay themselves" });
+    }
+  } else if (group.type !== "joint") {
+    return res.status(400).json({ error: "split-bills payments need a recipient" });
+  }
   await touchGroup(group.id);
 
   const payment = await prisma.payment.create({
     data: {
       groupId: group.id,
-      fromMemberId: String(fromMemberId),
+      fromMemberId: fromMember.id,
       toMemberId: toMemberId ? String(toMemberId) : null,
       amount: amt,
       date: paymentDate?.date ?? new Date(),

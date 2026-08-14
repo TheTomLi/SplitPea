@@ -10,6 +10,8 @@
     "apps/*"
   ],
   "scripts": {
+    "test": "node --import tsx packages/core/test/parser.test.ts && node --import tsx packages/core/test/balance.test.ts && npm test --workspace @splitpea/server",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p apps/server/tsconfig.json && node node_modules/typescript/bin/tsc --noEmit -p apps/app/tsconfig.json",
     "server": "npm run dev --workspace @splitpea/server",
     "app": "npm run web --workspace @splitpea/app",
     "db:push": "npm run db:push --workspace @splitpea/server",

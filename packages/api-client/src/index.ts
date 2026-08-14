@@ -85,6 +85,8 @@ export interface ExpenseProposal {
   splitBreakdown: { name: string; amount: number }[];
   /** Optional host heads-up (e.g. a referenced person isn't in the group). */
   notice?: string;
+  /** Whether deterministic rules or the LLM produced this proposal. */
+  createdVia: "rules" | "llm";
 }
 
 /** An ephemeral, not-yet-committed settlement the host parsed from a message. */
