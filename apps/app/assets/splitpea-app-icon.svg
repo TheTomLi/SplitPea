@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">SplitPea app icon</title>
+  <desc id="description">Three white peas held by a shared pod on a green background.</desc>
+  <rect width="512" height="512" fill="#176B4D"/>
+  <g fill="#FFFFFF">
+    <circle cx="166" cy="210" r="44"/>
+    <circle cx="256" cy="202" r="44"/>
+    <circle cx="346" cy="210" r="44"/>
+    <path d="M63 220c46 42 105 62 173 64 8 0 13 6 14 15l-6 40c-79-3-150-28-178-87-6-12-9-26-3-32Z"/>
+    <path d="M449 220c-46 42-105 62-173 64-8 0-13 6-14 15l6 40c79-3 150-28 178-87 6-12 9-26 3-32Z"/>
+  </g>
+</svg>

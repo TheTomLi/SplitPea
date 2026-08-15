@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Image,
   Linking,
   Pressable,
   ScrollView,
@@ -224,11 +225,12 @@ function HomeScreen({
     <ScrollView contentContainerStyle={styles.homeContainer}>
       <View style={styles.homeHero}>
         <View style={styles.brandLockup}>
-          <View style={styles.brandMark}>
-            <View style={styles.brandPea} />
-            <View style={styles.brandPea} />
-            <View style={styles.brandPea} />
-          </View>
+          <Image
+            accessibilityLabel="SplitPea logo"
+            resizeMode="contain"
+            source={require("./assets/splitpea-mark.png")}
+            style={styles.brandMark}
+          />
           <Text style={styles.wordmark}>SplitPea</Text>
         </View>
         <Text style={styles.title}>Shared expenses, sorted.</Text>
@@ -1049,22 +1051,8 @@ const styles = StyleSheet.create({
     alignSelf: "center",
   },
   homeHero: { gap: 10, paddingTop: 20, paddingBottom: 6 },
-  brandLockup: { flexDirection: "row", alignItems: "center", gap: 10 },
-  brandMark: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: COLORS.brand,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 3,
-    shadowColor: COLORS.brand,
-    shadowOpacity: 0.18,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  brandPea: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#FFFFFF" },
+  brandLockup: { flexDirection: "row", alignItems: "center", gap: 9 },
+  brandMark: { width: 48, height: 28 },
   wordmark: {
     fontSize: 19,
     lineHeight: 24,
