@@ -199,7 +199,7 @@ Voice = native dictation → text → same parser pipeline. No extra cost.
 - **Backend:** Express API in `apps/server`, hosted on Railway. Prisma with
   SQLite locally and Neon PostgreSQL in production.
 - **Web hosting:** Cloudflare Pages at `getsplitpea.com`; API at
-  `api.getsplitpea.com` with a stable `/api/v1` prefix.
+  `splitpeaserver-production.up.railway.app` with a stable `/api/v1` prefix.
 - **LLM:** Gemini Flash free tier (swappable).
 - **Balance math + parser:** `packages/core`, pure TS, reused everywhere.
 

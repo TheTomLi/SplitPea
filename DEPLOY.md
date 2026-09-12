@@ -4,7 +4,8 @@ The launch stack is:
 
 - **Cloudflare Registrar + DNS** — `getsplitpea.com`
 - **Cloudflare Pages** — Expo web build at `https://getsplitpea.com`
-- **Railway** — Express API at `https://api.getsplitpea.com`
+- **Railway** — Express API at
+  `https://splitpeaserver-production.up.railway.app`
 - **Neon** — managed PostgreSQL in North America
 
 The repository is already configured for this stack. The production Prisma
@@ -88,7 +89,7 @@ They can be overridden with the variables documented in
 3. Add these **build-time** environment variables for both Production and Preview:
 
    ```text
-   EXPO_PUBLIC_API_BASE_URL=https://api.getsplitpea.com
+   EXPO_PUBLIC_API_BASE_URL=https://splitpeaserver-production.up.railway.app
    EXPO_PUBLIC_KOFI_URL=https://ko-fi.com/splitpea
    NODE_VERSION=22
    ```
@@ -109,7 +110,9 @@ Pushes to `main` now rebuild Railway and Cloudflare automatically.
 
 Run this against production before sharing the URL:
 
-1. Open `https://api.getsplitpea.com/api/v1/health` and confirm `{"ok":true}`.
+1. Open
+   `https://splitpeaserver-production.up.railway.app/api/v1/health` and confirm
+   `{"ok":true}`.
 2. Open `https://getsplitpea.com` in a private browser window.
 3. Create a split-bills group with two people.
 4. Enter: `$40 on dinner, paid by Emma, for Tom and Emma, split evenly`.
