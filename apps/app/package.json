@@ -18,6 +18,7 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
+    "test": "node --import tsx test/invite.test.ts && node --import tsx test/date-input.test.ts",
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",

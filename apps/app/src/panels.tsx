@@ -21,6 +21,7 @@ import type {
   StatementPeriodView,
 } from "@splitpea/api-client";
 import { api } from "./api";
+import { formatIsoDateInput } from "./date-input";
 import {
   Button,
   Chip,
@@ -319,8 +320,9 @@ export function ExpenseForm({
         style={u.input}
         placeholder="YYYY-MM-DD"
         value={date}
-        onChangeText={setDate}
+        onChangeText={(value) => setDate(formatIsoDateInput(value))}
         inputMode="numeric"
+        maxLength={10}
       />
 
       {isJoint ? (
@@ -893,8 +895,9 @@ export function BalancesPanel({
                 style={u.input}
                 placeholder="YYYY-MM-DD"
                 value={from}
-                onChangeText={setFrom}
+                onChangeText={(value) => setFrom(formatIsoDateInput(value))}
                 inputMode="numeric"
+                maxLength={10}
               />
             </View>
             <View style={{ flex: 1, gap: 5 }}>
@@ -904,8 +907,9 @@ export function BalancesPanel({
                 style={u.input}
                 placeholder="YYYY-MM-DD"
                 value={to}
-                onChangeText={setTo}
+                onChangeText={(value) => setTo(formatIsoDateInput(value))}
                 inputMode="numeric"
+                maxLength={10}
               />
             </View>
           </View>
